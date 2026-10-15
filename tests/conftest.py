@@ -10,7 +10,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 # app import se PEHLE env set karna zaroori hai (config isi ko padhta hai)
-os.environ["DATABASE_URL"] = "sqlite:///./data/test_agent.db"
+# TEST_DATABASE_URL set ho (Postgres) to wahi use hoga — concurrency tests ke liye
+# asli evidence ke saath chalate hain (SQLite writes serialise karta hai).
+os.environ["DATABASE_URL"] = os.getenv("TEST_DATABASE_URL") or "sqlite:///./data/test_agent.db"
 os.environ["DEMO_SEED"] = "false"
 os.environ["WHATSAPP_MODE"] = "mock"
 os.environ["LLM_MODE"] = "demo"

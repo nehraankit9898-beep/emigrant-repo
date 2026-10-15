@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import ClassVar
 
 from dotenv import load_dotenv
 
@@ -40,6 +41,15 @@ def _f(key: str, default: float) -> float:
         return float(_s(key, str(default)))
     except ValueError:
         return default
+
+
+def _valid_hhmm(value: str) -> bool:
+    """'23:00' / '09:30' — automation ke time fields ka format check."""
+    try:
+        hour, minute = str(value).split(":")
+        return 0 <= int(hour) <= 23 and 0 <= int(minute) <= 59
+    except (ValueError, AttributeError):
+        return False
 
 
 @dataclass
@@ -163,6 +173,94 @@ class Settings:
         if not self.public_base_url.startswith("https://"):
             problems.append("production me PUBLIC_BASE_URL https:// se shuru hona chahiye")
         return problems
+
+    # ---- runtime overrides (dashboard Settings tab se) ----
+    # Section -> (field name, caster, validator). Sirf yahi keys DB override se badal sakte hain.
+    OVERRIDABLE: ClassVar[dict] = {
+        "restaurant": {
+            "name": (str, None),
+            "city": (str, None),
+            "address": (str, None),
+            "phone": (str, None),
+            "hours": (str, None),
+            "tagline": (str, None),
+            "google_review_link": (str, None),
+        },
+        "agent": {
+            "name": (str, None),
+            "persona_extra": (str, None),
+        },
+        "money": {
+            # GST 0-28% (Indian slabs), discount cap 0-100%, points sabit range me
+            "gst_percent": (float, lambda v: 0 <= v <= 28),
+            "max_discount_percent": (float, lambda v: 0 <= v <= 100),
+            "loyalty_points_per_100": (int, lambda v: 0 <= v <= 1000),
+            "free_coffee_points": (int, lambda v: 1 <= v <= 1_000_000),
+        },
+        "automation": {
+            "enabled": (bool, None),
+            "owner_report_time": (str, _valid_hhmm),
+            "birthday_time": (str, _valid_hhmm),
+            "winback_days": (int, lambda v: 1 <= v <= 365),
+            "max_proactive_per_day": (int, lambda v: 1 <= v <= 100_000),
+        },
+    }
+
+    # Settings tab section.key se bhejta hai; Settings dataclass ka field name alag hai.
+    OVERRIDE_FIELD: ClassVar[dict] = {
+        ("restaurant", "name"): "restaurant_name",
+        ("restaurant", "city"): "restaurant_city",
+        ("restaurant", "address"): "restaurant_address",
+        ("restaurant", "phone"): "restaurant_phone",
+        ("restaurant", "hours"): "restaurant_hours",
+        ("restaurant", "tagline"): "restaurant_tagline",
+        ("restaurant", "google_review_link"): "google_review_link",
+        ("agent", "name"): "agent_name",
+        ("agent", "persona_extra"): "agent_persona_extra",
+        ("money", "gst_percent"): "gst_percent",
+        ("money", "max_discount_percent"): "max_discount_percent",
+        ("money", "loyalty_points_per_100"): "loyalty_points_per_100",
+        ("money", "free_coffee_points"): "free_coffee_points",
+        ("automation", "enabled"): "automation_enabled",
+        ("automation", "owner_report_time"): "owner_report_time",
+        ("automation", "birthday_time"): "birthday_time",
+        ("automation", "winback_days"): "winback_days",
+        ("automation", "max_proactive_per_day"): "max_proactive_per_day",
+    }
+
+    def apply_overrides(self, overrides: dict | None) -> dict:
+        """DB/runtime overrides ko settings par lagao. Return: jo apply hua (aur jo reject hua).
+
+        Galat value (jaise GST 500%) chupke se ignore nahi hoti — `rejected` me milti hai.
+        """
+        applied: dict = {}
+        rejected: dict = {}
+        for section, values in (overrides or {}).items():
+            spec = self.OVERRIDABLE.get(section)
+            if not spec or not isinstance(values, dict):
+                if values is not None and not isinstance(values, dict):
+                    rejected[section] = "object hona chahiye"
+                continue
+            for key, value in values.items():
+                if key not in spec:
+                    rejected[f"{section}.{key}"] = "ye setting change nahi ho sakti"
+                    continue
+                caster, validator = spec[key]
+                try:
+                    casted = caster(value)
+                except (TypeError, ValueError):
+                    rejected[f"{section}.{key}"] = "galat type"
+                    continue
+                if validator is not None and not validator(casted):
+                    rejected[f"{section}.{key}"] = "range/format galat hai"
+                    continue
+                field_name = self.OVERRIDE_FIELD.get((section, key))
+                if not field_name or not hasattr(self, field_name):
+                    rejected[f"{section}.{key}"] = "field nahi mila"
+                    continue
+                setattr(self, field_name, casted)
+                applied.setdefault(section, {})[key] = casted
+        return {"applied": applied, "rejected": rejected}
 
     def mode_report(self) -> dict:
         """Dashboard banner ke liye — kya asli hai, kya demo hai."""

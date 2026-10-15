@@ -1,6 +1,10 @@
 # FEATURE STATUS — Sharma Cafe WhatsApp AI Agent
 
-Date: 2026-10-15 · Branch: `arena/962345dc-emigrant-repo`
+Date: 2026-10-15 · Branch: `arena/dd5271e6-emigrant-repo` (base `main@e1aef9d`)
+
+> **Update (this pass):** four defects found by live end-to-end testing are fixed and covered by
+> regression tests — see [Bug fixes verified in this pass](#bug-fixes-verified-in-this-pass) at the
+> bottom. Concurrency claims (P0-2) now have tests instead of code review only.
 
 ## Status definitions
 
@@ -23,18 +27,18 @@ Date: 2026-10-15 · Branch: `arena/962345dc-emigrant-repo`
 | 2 | WhatsApp webhook verify handshake | **WORKING_VERIFIED** | manual M-06 (403 wrong token), M-07 (challenge echoed) | — |
 | 3 | WhatsApp outbound send, honest result | **PARTIAL** | Mock sends exercised in tests; code returns provider result | Provider rejection → "not sent" path not run against Meta |
 | 4 | WhatsApp live (Cloud API) | **BLOCKED_EXTERNAL_SETUP** | Needs `WHATSAPP_TOKEN`, phone number ID, approved templates | Account setup by owner |
-| 5 | Inbound dedupe (WhatsApp message id) | **WORKING_VERIFIED** (sequential) | `test_flow` idempotency tests; claim in same transaction | Concurrent duplicate on Postgres not run |
+| 5 | Inbound dedupe (WhatsApp message id) | **WORKING_VERIFIED** (sequential + threads) | `test_flow` idempotency tests + `test_concurrency`: 12 threads claim one event → 1 winner; claim in same transaction | Concurrent duplicate on Postgres not run |
 | 6 | Menu browse / text ordering (demo brain) | **WORKING_VERIFIED** | `test_flow` (26 tests), `scripts.demo_chat` run, manual M-09 | Demo brain is rule-based, not LLM |
 | 7 | Kitchen flow (confirm → preparing → ready → delivered) | **WORKING_VERIFIED** | `test_flow` `walk_to_delivered` helper; transition validation | Dashboard buttons not browser-tested |
 | 8 | Unknown order status update | **PARTIAL** | Code returns 400 before transition check; no dedicated test found | Add a route test |
-| 9 | Order numbering | **PARTIAL** | Now `1000 + primary key` (sequence-backed, no reuse); used across test suite | Concurrent creation on Postgres not run |
+| 9 | Order numbering | **WORKING_VERIFIED** | `1000 + primary key` (sequence-backed, no reuse); `test_concurrency`: 12 parallel orders → 12 unique numbers, no collision with existing rows | Concurrent run on Postgres still not executed (SQLite only here) |
 | 10 | Bill engine (Decimal, paise rounding) | **WORKING_VERIFIED** | `test_pricing` (9): exact 3×33.33, 15% off, 5% GST → 89.24; rounding 0.285→0.29; qty 0 rejected | — |
 | 11 | Discount cap (25%) and non-negative total | **WORKING_VERIFIED** | `test_pricing` | — |
 | 12 | Freebies excluded from subtotal | **WORKING_VERIFIED** | `test_pricing` | — |
 | 13 | Per-restaurant GST | **NOT_IMPLEMENTED** | No tenant model. GST is one per deployment (`GST_PERCENT`, default 5.0, Decimal math) | Needs restaurant table + per-tenant tax setting |
 | 14 | Universal GST hardcoding | **PARTIAL** | Default `5.0` in `config.py` is a default, overridable by env | Remove default for SaaS use |
 | 15 | Discount rules (`nth_order`) | **PARTIAL** | Rules fire; behaviour is "order number ≥ N", not "exactly the N-th" | **Product decision needed** (see plan) |
-| 16 | Coupon issue / single use | **PARTIAL** | `test_coupons` (5): single use, phone-bound, expiry, cancel releases, double redeem loses | Race-safety verified only in one process (SQLite) |
+| 16 | Coupon issue / single use | **WORKING_VERIFIED** | `test_coupons` (5) + `test_concurrency`: 12 threads race to redeem one coupon → exactly 1 winner | Concurrent run on Postgres not executed |
 | 17 | Coupon codes unpredictable | **PARTIAL** | Code uses `secrets.choice` (code review only); thanks tail 6 chars | Not tested by running |
 | 18 | Razorpay payment link creation (live) | **BLOCKED_EXTERNAL_SETUP** | Needs `RAZORPAY_KEY_ID`/`SECRET` | — |
 | 19 | Razorpay webhook (signed, fail-closed) | **PARTIAL** | Regression tests with fixture secret: unsigned/forged rejected, duplicate skipped | Live Razorpay events not received |
@@ -66,17 +70,43 @@ Date: 2026-10-15 · Branch: `arena/962345dc-emigrant-repo`
 | 45 | LLM (live provider) | **BLOCKED_EXTERNAL_SETUP** | Needs API key | — |
 | 46 | LLM prompt isolation against injection | **PARTIAL** | Server recomputes prices and validates items; no prompt sandboxing | Customer text is not delimited/isolated in prompt |
 | 47 | LLM fallback to demo brain | **WORKING_VERIFIED** | demo flows run | — |
-| 48 | Settings API (`PUT /api/settings`) | **PARTIAL** | Requires admin | Mutates process-global settings; not persisted; not per-tenant |
+| 48 | Settings API (`PUT /api/settings`) | **WORKING_VERIFIED** | `test_billing_regressions`: saved overrides apply immediately (`gst_percent` 5→18 shows in the next bill), reload from DB on restart, invalid values rejected (`rejected` in response, nothing changes) | Still per-deployment (not per-tenant); `templates` section stored but unused |
 | 49 | Rate limiting | **NOT_IMPLEMENTED** | none | Add at proxy or middleware |
 | 50 | Outbox / demo WhatsApp payload views | **MOCK_ONLY** | admin-gated | Demo-only data views |
 | 51 | Owner / user documentation | **PARTIAL** | `docs/OWNER-DEMO-SCRIPT.md`, `docs/API-SETUP-GUIDE.md` (existing) | Setup guide not re-verified line by line |
 
+## Bug fixes verified in this pass
+
+Found by running the app (not by reading it): a scripted walkthrough of the real HTTP API plus
+targeted probes of every money path. Each defect was first **reproduced on the unfixed code**
+(`git worktree` at the base commit) and then shown passing after the fix, so the tests are known
+to catch the bug rather than merely describing current behaviour.
+
+| # | Defect | Impact | Reproduction (before fix) | Fix | Test |
+|---|---|---|---|---|---|
+| B-1 | Pending order was not tracked — `flow_state["active_order"]` was set **only** for COD orders | Customer who asks for the payment link again gets *"Sir abhi koi pending bill nahi hai"* while the order is still unpaid; `order status` said *"link bhejun phir se?"* and `pay` then refused — contradictory | `pay` reply: `Sir abhi koi pending bill nahi hai 🙏` | Set `active_order` for every order, plus a DB fallback (`latest_unpaid_order`) that ignores cancelled orders | `test_pending_order_is_tracked_after_order`, `test_pay_returns_link_for_unpaid_order`, `test_latest_unpaid_order_ignores_cancelled`, `test_pay_after_payment_says_nothing_pending` |
+| B-2 | `bill` rebuilt the bill from `order.items` **without the discount** | Customer is shown a **higher** total than they were charged — after paying ₹718.20 the agent still said *"Total: ₹798"* | `bill ₹798.0 vs asli ₹718.2` | `pricing.bill_from_order()` rebuilds using the rates stored on the order | `test_bill_after_payment_matches_original_total`, `test_bill_from_order_reproduces_stored_total`, `test_bill_from_order_keeps_freebies` |
+| B-3 | `/api/orders/{no}/resend-link` had the same defect | The link charges ₹718.20 but the message quotes ₹798 | `message ₹798.0 vs order ₹718.2` | Route uses `bill_from_order` | `test_resend_link_quotes_order_total` |
+| B-4 | `PUT /api/settings` wrote to a table **nothing read** | Settings tab silently did nothing for GST / restaurant fields — *"saved"* was returned, the next bill was unchanged | `GST apply nahi hua (abhi bhi 5.0)` | Validated override map (`settings.apply_overrides`) applied on save **and** reloaded from DB at startup | `test_settings_put_applies_gst_to_next_bill`, `test_settings_are_read_back_from_db`, `test_settings_override_rejects_*` |
+
+Root cause of B-2/B-3: `Order` stored the discount **amount** but not the **rate**, so a rebuild
+could not reproduce the original bill. Two new columns (`discount_percent`, `gst_percent`) plus
+migration `0003_order_bill_rates` now store the applied rates — which also means a historical bill
+keeps showing the rate that was actually used, even after config changes
+(`test_bill_from_order_ignores_later_config_change`).
+
+Migration notes: `0003` is non-destructive and idempotent, back-fills legacy rows from
+`discount_amount / subtotal` and `gst_amount / taxable`, and round-trips on downgrade/upgrade.
+`app.database.add_missing_columns()` additionally lets an existing **dev** database gain new
+columns instead of crashing with *"no such column"* (production schema remains migration-only).
+Verified: 46 pre-existing demo orders all rebuild to their exact stored totals.
+
 ## Summary counts (computed from the table above)
 
 - Total rows: 51
-- WORKING_VERIFIED: 18  (row 40 is SQLite-only)
-- PARTIAL: 22
+- WORKING_VERIFIED: 21  (row 40 is SQLite-only)
+- PARTIAL: 19
 - MOCK_ONLY: 2
 - NOT_IMPLEMENTED: 4  (per-restaurant GST, RBAC, tenant isolation, rate limiting)
 - BLOCKED_EXTERNAL_SETUP: 5  (WhatsApp live, Razorpay live, PostgreSQL, Docker, live LLM)
-- BROKEN: 0 known after this pass. Baseline defects are listed in PROJECT_AUDIT §3 and their fixes in §4.
+- BROKEN: 0 known. Baseline defects are in PROJECT_AUDIT §3; this pass's defects in the table above.

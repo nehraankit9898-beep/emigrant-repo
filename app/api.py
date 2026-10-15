@@ -345,13 +345,8 @@ def resend_link(order_no: str, request: Request = None, db: Session = Depends(ge
     if not order:
         raise HTTPException(status_code=404, detail="order nahi mila")
     customer = memory.get_or_create_customer(db, order.customer_phone)[0]
-    bill = orchestrator.build_bill(
-        db,
-        [
-            dict(name=row.get("name"), qty=row.get("qty", 1), unit_price=row.get("price", 0), is_freebie=row.get("free", False))
-            for row in (order.items or [])
-        ],
-    )
+    # wahi bill jo bana tha (discount + GST ke saath) — naye hisaab se amount badal jaata tha
+    bill = orchestrator.bill_from_order(db, order)
     message = orchestrator.payment_message_for(db, order, bill, base_url=_request_base(request))
     whatsapp.send_text(customer.phone, message)
     orchestrator.log_message(db, customer.phone, "out", message, intent="payment_link")
@@ -914,8 +909,11 @@ def get_settings(db: Session = Depends(get_db)):
 
 @router.put("/settings", dependencies=[Depends(require_admin)])
 def update_settings(payload: dict = Body(...), db: Session = Depends(get_db)):
-    """Runtime settings — DB me save (server restart ke bina)."""
-    allowed = {"restaurant", "agent", "money", "automation", "templates"}
+    """Runtime settings — DB me save + turant settings par apply.
+
+    Galat value (jaise GST 500%) save nahi hoti — `rejected` me wapas mil jaati hai.
+    """
+    allowed = set(settings.OVERRIDABLE) | {"templates"}
     saved: dict[str, Any] = {}
     for key, value in payload.items():
         if key not in allowed:
@@ -927,15 +925,17 @@ def update_settings(payload: dict = Body(...), db: Session = Depends(get_db)):
             db.add(AppSetting(key=key, value=value or {}))
         saved[key] = value
 
-    # kuch cheezein live settings par bhi apply karo (persona + profile)
-    if "agent" in payload and payload["agent"]:
-        settings.agent_persona_extra = payload["agent"].get("persona_extra", settings.agent_persona_extra)
-    if "restaurant" in payload and payload["restaurant"]:
-        settings.google_review_link = payload["restaurant"].get("google_review_link", settings.google_review_link)
-        settings.restaurant_hours = payload["restaurant"].get("hours", settings.restaurant_hours)
-    audit(db, actor="dashboard", action="settings.updated", details={"sections": sorted(saved.keys())})
+    # DB me save ke baad settings par bhi lagao — warna ye table sirf likhi jaati thi,
+    # par koi padhta nahi tha (GST/persona/profile change ka koi asar nahi hota tha).
+    result = settings.apply_overrides(saved)
+    audit(
+        db,
+        actor="dashboard",
+        action="settings.updated",
+        details={"sections": sorted(saved.keys()), "rejected": result["rejected"]},
+    )
     db.commit()
-    return {"saved": saved}
+    return {"saved": result["applied"], "rejected": result["rejected"]}
 
 
 @router.get("/prompt", dependencies=[Depends(require_admin)])

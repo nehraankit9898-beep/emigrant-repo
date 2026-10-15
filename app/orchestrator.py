@@ -18,9 +18,9 @@ from sqlalchemy.orm import Session
 from . import discounts, intent as intent_engine, llm, memory, menu as menu_engine, payments, reservations, whatsapp
 from .security import audit
 from .config import settings
-from .models import Alert, Customer, Feedback, MenuItem, Message, Order, OrderItem, Payment, Reservation
+from .models import Alert, Customer, Feedback, Message, Order, OrderItem, Payment, Reservation
 from . import pricing
-from .pricing import Bill, build_bill
+from .pricing import Bill, bill_from_order, build_bill
 from .utils import (
     clean_phone,
     detect_language,
@@ -198,11 +198,6 @@ def create_order(
     """Bill banao + order save karo. Price hamesha menu se, AI se nahi."""
     freebies = list(freebies or [])
     bill_lines: list[dict] = [dict(line) for line in lines]
-    menu_items: dict[str, MenuItem] = {}
-    for row in bill_lines:
-        item = menu_engine.find_item(db, row.get("name", ""))
-        if item:
-            menu_items[item.name] = item
     for freebie_name in freebies:
         item = menu_engine.find_item(db, freebie_name)
         bill_lines.append(
@@ -240,6 +235,8 @@ def create_order(
         ],
         subtotal=bill.subtotal,
         discount_amount=bill.discount_amount,
+        discount_percent=bill.discount_percent,
+        gst_percent=bill.gst_percent,
         discount_code=bill.discount_code,
         discount_reason=bill.discount_reason,
         freebies=bill.freebies,
@@ -298,6 +295,23 @@ def payment_message_for(db: Session, order: Order, bill: Bill, base_url: str | N
 # --------------------------------------------------------------------------
 # Intent handlers
 # --------------------------------------------------------------------------
+def latest_unpaid_order(db: Session, customer: Customer) -> Order | None:
+    """Is customer ka sabse recent order jiska payment abhi baaki hai.
+
+    Cancel hue order ko pending nahi maante (warna "pay" cancel order ka link bhej dega).
+    """
+    return db.scalar(
+        select(Order)
+        .where(
+            Order.customer_phone == customer.phone,
+            Order.payment_status == "pending",
+            Order.order_status != "cancelled",
+        )
+        .order_by(Order.id.desc())
+        .limit(1)
+    )
+
+
 def _menu_facts(db: Session, customer: Customer) -> dict:
     specials = menu_engine.signature_items(db) or menu_engine.most_sold(db, 2)
     special = specials[0].name if specials else "Cold Coffee"
@@ -408,13 +422,17 @@ def _handle_order(db: Session, customer: Customer, text: str, last_intent: str |
     if coupon_note:
         opener = f"{coupon_note}{opener}"
 
+    # Pending order ko flow_state me note karo — tabhi "bill"/"pay" wapas usi order ko
+    # dhoondh paayenge. Pehle ye sirf COD orders ke liye hota tha, jisse online payment
+    # wale order par "pay" bolne par agent keh deta tha "koi pending bill nahi hai".
+    customer.flow_state = {**(customer.flow_state or {}), "active_order": order.order_no}
+
     if is_cod:
         body = (
             f"{opener}\n\n{bill.text()}\n\n"
             f"Order # {order.order_no} pakka ho gaya ✅ Counter/bill par paisa de dijiye, "
             f"kitchen me order chala gaya hai 👨‍🍳 25-30 min me taiyaar."
         )
-        customer.flow_state = {**(customer.flow_state or {}), "active_order": order.order_no}
         return [Reply(text=body, intent="order_cod", meta={"order_no": order.order_no})]
 
     body = f"{opener}\n\n{payment_message_for(db, order, bill, base_url=base_url)}"
@@ -431,11 +449,8 @@ def _handle_pending_payment(db: Session, customer: Customer, order: Order, base_
                 intent="payment_link",
             )
         ]
-    bill = build_bill(
-        db,
-        [dict(name=row.get("name"), qty=row.get("qty", 1), unit_price=row.get("price", 0), is_freebie=row.get("free", False)) for row in (order.items or [])],
-        discount_percent=0,
-    )
+    # order par save hua discount/gst wahi rahe (dobara hisaab se discount hat jaata tha)
+    bill = bill_from_order(db, order)
     return [Reply(text=payment_message_for(db, order, bill, base_url=base_url), intent="payment_link")]
 
 
@@ -837,10 +852,16 @@ def handle_inbound(db: Session, inbound: whatsapp.Inbound, deliver_replies: bool
     pending_order = None
     if state.get("active_order"):
         pending_order = db.scalar(select(Order).where(Order.order_no == str(state["active_order"])).limit(1))
-        if pending_order and pending_order.payment_status in {"paid", "cod"}:
+        if pending_order and (
+            pending_order.payment_status in {"paid", "cod"} or pending_order.order_status == "cancelled"
+        ):
+            # payment ho gaya / COD tha / order cancel ho gaya — ab ye pending nahi hai
             pending_order = None
             state.pop("active_order", None)
             customer.flow_state = state
+    if pending_order is None:
+        # flow_state kho gaya ho ya kabhi set hi na hua ho, tab bhi unpaid order milna chahiye.
+        pending_order = latest_unpaid_order(db, customer)
     awaiting_feedback = bool(state.get("awaiting_feedback"))
 
     # ---------- special inbound types (voice / photo) ----------
@@ -976,14 +997,8 @@ def handle_inbound(db: Session, inbound: whatsapp.Inbound, deliver_replies: bool
         else:
             last_order = db.scalar(select(Order).where(Order.customer_phone == customer.phone).order_by(Order.created_at.desc()).limit(1))
             if last_order:
-                bill = build_bill(
-                    db,
-                    [
-                        dict(name=row.get("name"), qty=row.get("qty", 1), unit_price=row.get("price", 0), is_freebie=row.get("free", False))
-                        for row in (last_order.items or [])
-                    ],
-                )
-                replies = [Reply(text=bill.text(), intent="bill")]
+                # wahi bill jo bana tha (discount + GST ke saath), naya hisaab nahi
+                replies = [Reply(text=bill_from_order(db, last_order).text(), intent="bill")]
             else:
                 replies = [Reply(text="Sir abhi koi order hi nahi hua 😄 Pehle kuch order kar lijiye, phir bill bhejta hoon.", intent="bill_none")]
     elif intent_name == "pay":
