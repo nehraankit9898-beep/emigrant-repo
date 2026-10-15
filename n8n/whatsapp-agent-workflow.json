@@ -1,0 +1,261 @@
+{
+  "name": "Sharma Cafe — WhatsApp Agent (Low-Code / n8n version)",
+  "meta": {
+    "instanceId": "sharma-cafe-wa-agent",
+    "description": "Report ka Tarika 2 (Low-Code). Ye workflow Meta webhook se message leta hai, Supabase/Postgres me customer yaad rakhta hai, AI se Hinglish jawab banata hai aur wapas WhatsApp par bhejta hai. Bina Python server ke chhota setup chahiye to yahi use karo."
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "whatsapp-webhook",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-verify",
+      "name": "1. Meta Webhook Verify (GET)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-1180, 100],
+      "webhookId": "whatsapp-verify",
+      "notes": "Meta ye URL GET se check karta hai. hub.verify_token match hone par hub.challenge wapas bhejo."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.query['hub.verify_token'] }}",
+              "value2": "={{ $env.WHATSAPP_VERIFY_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "if-verify-token",
+      "name": "2. Verify Token Sahi Hai?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [-940, 100]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.query['hub.challenge'] }}"
+      },
+      "id": "respond-challenge",
+      "name": "3. Challenge Wapas Bhejo",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [-700, 20]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp-webhook",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-receive",
+      "name": "4. Message Aaya (POST)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-1180, 320],
+      "webhookId": "whatsapp-receive",
+      "notes": "Customer ke messages yahan aate hain. Body: entry[0].changes[0].value.messages[0]"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Meta ka webhook body -> simple fields (report Section 7 ka format)\nconst value = $json.body?.entry?.[0]?.changes?.[0]?.value || {};\nconst msg = value.messages?.[0] || {};\nconst from = msg.from || '';\nconst text = msg.text?.body || msg.button?.text || '';\nconst profileName = value.contacts?.[0]?.profile?.name || '';\nreturn [{ json: { phone: from, text, profileName, messageId: msg.id || '', type: msg.type || 'unknown' } }];"
+      },
+      "id": "parse-inbound",
+      "name": "5. Message Padho",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-940, 320]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select id, phone, name, total_orders, total_spent, loyalty_points, last_order_summary, favourite_items, notes, birthday, opt_in, opted_out, human_mode from customers where phone = '{{ $json.phone }}' limit 1;",
+        "options": {}
+      },
+      "id": "db-customer",
+      "name": "6. Customer Dhundo (Memory)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [-700, 320],
+      "notes": "Supabase/Postgres connection yahan lagao. Naya customer ho to 6b node insert karega."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "insert into customers (phone, name, opt_in) values ('{{ $('5. Message Padho').item.json.phone }}', '{{ $('5. Message Padho').item.json.profileName }}', false) on conflict (phone) do nothing; select * from customers where phone = '{{ $('5. Message Padho').item.json.phone }}' limit 1;",
+        "options": {}
+      },
+      "id": "db-customer-new",
+      "name": "6b. Naya Customer Banao",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [-700, 480]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select name, price, category, is_veg from menu_items where is_available = true;",
+        "options": {}
+      },
+      "id": "db-menu",
+      "name": "7. Menu + Price (AI ko sirf ye sach)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [-460, 320]
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "model": "gpt-4o-mini",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "Tum {{ $env.AGENT_NAME }} ho, {{ $env.RESTAURANT_NAME }} ke digital waiter. Hinglish me 2-3 line me jawab do, funny but izzat-daar. Price/discount ka number sirf neeche diye DATA se lo, apne mann se koi number mat banao. Customer naraz ho to pehli line me maafi maango.\n\nCUSTOMER MEMORY: {{ JSON.stringify($('6. Customer Dhundo (Memory)').first().json) }}\nMENU + PRICE (sirf ye sach hai): {{ JSON.stringify($('7. Menu + Price (AI ko sirf ye sach)').all().map(i => i.json)) }}\n\nTODO (business rule): agar naya customer hai to WELCOME10 (10%) bata do, agar 3rd order hai to REGULAR15 (15%), bill 999+ par ek dessert free."
+            },
+            {
+              "role": "user",
+              "content": "={{ $('5. Message Padho').item.json.text }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "ai-reply",
+      "name": "8. AI se Funny Jawab",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [-220, 320],
+      "credentials": { "openAiApi": { "id": "REPLACE_ME", "name": "OpenAI account" } }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/{{ $env.WHATSAPP_API_VERSION }}/{{ $env.WHATSAPP_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.WHATSAPP_TOKEN }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('5. Message Padho').item.json.phone }}\",\n  \"type\": \"text\",\n  \"text\": { \"body\": {{ JSON.stringify($json.message?.content || $json.text || '') }} }\n}",
+        "options": {}
+      },
+      "id": "wa-send",
+      "name": "9. WhatsApp par Jawab Bhejo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [20, 320]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "insert into messages (customer_phone, direction, text, intent, channel, created_at) values ('{{ $('5. Message Padho').item.json.phone }}', 'out', '{{ ($json.message?.content || '').replace(\"'\", \"''\") }}', 'auto_reply', 'whatsapp', now());",
+        "options": {}
+      },
+      "id": "db-log",
+      "name": "10. Chat Log Save",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [260, 320]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "hours", "hoursInterval": 24 }]
+        }
+      },
+      "id": "cron-daily",
+      "name": "11. Roz Raat 11 Baje (Owner Report + Birthday)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [-1180, 600],
+      "notes": "Is branch se daily report, birthday wish aur winback chalte hain. Python version me ye app/automations.py karta hai."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Aaj ki sale\nselect coalesce(sum(total_amount), 0) as sale, count(*) as orders\nfrom orders\nwhere payment_status = 'paid'\n  and created_at::date = (now() at time zone 'Asia/Kolkata')::date;",
+        "options": {}
+      },
+      "id": "db-report",
+      "name": "12. Aaj ka Hisaab",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [-940, 600]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/{{ $env.WHATSAPP_API_VERSION }}/{{ $env.WHATSAPP_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "Authorization", "value": "=Bearer {{ $env.WHATSAPP_TOKEN }}" }]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $env.OWNER_WHATSAPP }}\",\n  \"type\": \"text\",\n  \"text\": { \"body\": \"Aaj ki Sale: Rs {{ $json.sale }} | Orders: {{ $json.orders }} — Sharma Cafe agent\" }\n}",
+        "options": {}
+      },
+      "id": "wa-owner",
+      "name": "13. Owner ko Report Bhejo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-700, 600]
+    }
+  ],
+  "connections": {
+    "1. Meta Webhook Verify (GET)": {
+      "main": [[{ "node": "2. Verify Token Sahi Hai?", "type": "main", "index": 0 }]]
+    },
+    "2. Verify Token Sahi Hai?": {
+      "main": [
+        [{ "node": "3. Challenge Wapas Bhejo", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "4. Message Aaya (POST)": {
+      "main": [[{ "node": "5. Message Padho", "type": "main", "index": 0 }]]
+    },
+    "5. Message Padho": {
+      "main": [[{ "node": "6. Customer Dhundo (Memory)", "type": "main", "index": 0 }]]
+    },
+    "6. Customer Dhundo (Memory)": {
+      "main": [
+        [{ "node": "7. Menu + Price (AI ko sirf ye sach)", "type": "main", "index": 0 }],
+        [{ "node": "6b. Naya Customer Banao", "type": "main", "index": 0 }]
+      ]
+    },
+    "6b. Naya Customer Banao": {
+      "main": [[{ "node": "7. Menu + Price (AI ko sirf ye sach)", "type": "main", "index": 0 }]]
+    },
+    "7. Menu + Price (AI ko sirf ye sach)": {
+      "main": [[{ "node": "8. AI se Funny Jawab", "type": "main", "index": 0 }]]
+    },
+    "8. AI se Funny Jawab": {
+      "main": [[{ "node": "9. WhatsApp par Jawab Bhejo", "type": "main", "index": 0 }]]
+    },
+    "9. WhatsApp par Jawab Bhejo": {
+      "main": [[{ "node": "10. Chat Log Save", "type": "main", "index": 0 }]]
+    },
+    "11. Roz Raat 11 Baje (Owner Report + Birthday)": {
+      "main": [[{ "node": "12. Aaj ka Hisaab", "type": "main", "index": 0 }]]
+    },
+    "12. Aaj ka Hisaab": {
+      "main": [[{ "node": "13. Owner ko Report Bhejo", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {},
+  "tags": [{ "name": "whatsapp" }, { "name": "restaurant" }, { "name": "low-code" }],
+  "versionId": "1"
+}

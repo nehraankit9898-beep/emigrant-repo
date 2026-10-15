@@ -1,0 +1,30 @@
+name: tests
+
+on:
+  push:
+    branches: ["main", "arena/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run tests
+        env:
+          DATABASE_URL: sqlite:///./data/ci_test.db
+          DEMO_SEED: "false"
+          WHATSAPP_MODE: mock
+          LLM_MODE: demo
+          PAYMENT_MODE: mock
+          AUTOMATION_ENABLED: "false"
+        run: python -m pytest -q
+      - name: Demo chat smoke test
+        run: python -m scripts.demo_chat --phone 919000000123 --name "CI Tester" | tail -25
