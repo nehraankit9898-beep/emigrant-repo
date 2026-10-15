@@ -17,7 +17,7 @@ from sqlalchemy import select
 
 from app import discounts, memory, menu as menu_engine, orchestrator, payments
 from app.config import Settings
-from app.models import AppSetting, Order
+from app.models import AppSetting, DiscountRule, Order
 from app.pricing import bill_from_order
 
 NEW_PHONE = "919333111111"
@@ -246,3 +246,178 @@ def test_menu_and_rules_still_seeded(db):
     """Sanity: fixtures ke baad bhi menu/rules maujood (upar ke tests inhi par chale)."""
     assert menu_engine.available_items(db)
     assert discounts.active_rules(db)
+
+
+# --------------------------------------------------------------------------
+# Bug 5 — quantity 1..MAX_ORDER_QTY ke bahar (chat + dashboard dono)
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "text",
+    ["50000 paneer tikka", "101 masala dosa", "999999 masala dosa", "2 masala dosa aur 999999 dosa"],
+)
+def test_huge_quantity_does_not_crash_chat(db, text):
+    """Fix se pehle build_bill ValueError uthata tha -> HTTP 500, customer ko koi jawab nahi.
+
+    WhatsApp failed delivery par dobara bhejta hai, to customer ko baar baar khamoshi milti thi.
+    """
+    body, result = say(db, "919333666666", text)
+    assert result.intent != "order_invalid"
+    assert body.strip()
+
+
+def test_huge_quantity_does_not_crash_api(client, db):
+    response = client.post(
+        "/api/orders",
+        json={"phone": "919333777777", "name": "Bulk", "items_text": "999999 masala dosa"},
+    )
+    assert response.status_code == 400, response.text
+
+
+@pytest.mark.parametrize("qty", [0, -3, 999999])
+def test_out_of_range_quantity_returns_400(client, db, qty):
+    response = client.post(
+        "/api/orders",
+        json={"phone": "919333888888", "name": "Q", "items": [{"name": "Masala Dosa", "qty": qty}]},
+    )
+    assert response.status_code == 400, response.text
+
+
+def test_non_numeric_quantity_returns_400(client, db):
+    response = client.post(
+        "/api/orders",
+        json={"phone": "919333888889", "name": "Q", "items": [{"name": "Masala Dosa", "qty": "abc"}]},
+    )
+    assert response.status_code == 400, response.text
+
+
+def test_quantity_cap_is_shared_by_parser_and_bill(db):
+    """Parser ki clamp aur build_bill ki validation ek hi limit maanein — alag hone par 500 aata tha."""
+    from app.config import settings
+    from app.pricing import build_bill
+
+    parsed = menu_engine.parse_order_text(db, "999999 masala dosa")
+    assert parsed.quantity_out_of_range is True
+    assert parsed.max_qty == int(settings.max_order_qty)
+    assert parsed.lines, "koi item match nahi hua"
+    assert all(1 <= line.qty <= parsed.max_qty for line in parsed.lines)
+    bill = build_bill(
+        db,
+        [{"name": l.name, "qty": l.qty, "unit_price": l.unit_price} for l in parsed.lines],
+    )
+    assert bill.total > 0
+
+
+def test_webhook_path_survives_huge_quantity(client, db):
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messages": [
+                                {"from": "919333999999", "type": "text",
+                                 "text": {"body": "999999 masala dosa"}}
+                            ]
+                        }
+                    }
+                ]
+            }
+        ],
+    }
+    response = client.post("/webhook", json=payload)
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "EVENT_RECEIVED"
+
+
+# --------------------------------------------------------------------------
+# Bug 6 — menu price non-numeric (add + edit)
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "bad_price", ["abc", [1], {"a": 1}, True, "NaN", "Infinity", "-Infinity", "1e999"]
+)
+def test_menu_bad_price_returns_400_not_500(client, db, bad_price):
+    """float("abc") -> 500 tha. NaN/Infinity har range check pass karke DB insert crash karate the."""
+    response = client.post("/api/menu", json={"name": "BadPrice", "price": bad_price})
+    assert response.status_code == 400, response.text
+
+
+def test_menu_negative_price_rejected(client, db):
+    assert client.post("/api/menu", json={"name": "NegPrice", "price": -100}).status_code == 400
+    item = menu_engine.find_item(db, "Masala Dosa")
+    assert item is not None
+    assert client.patch(f"/api/menu/{item.id}", json={"price": "abc"}).status_code == 400
+    assert client.patch(f"/api/menu/{item.id}", json={"price": -10}).status_code == 400
+
+
+# --------------------------------------------------------------------------
+# Bug 7 — rule priority non-numeric
+# --------------------------------------------------------------------------
+def test_rule_bad_priority_returns_400(client, db):
+    response = client.post(
+        "/api/rules",
+        json={"name": "BadPriority", "trigger": "first_order",
+              "priority": "abc", "reward": {"type": "percent", "value": 5}},
+    )
+    assert response.status_code == 400, response.text
+
+
+# --------------------------------------------------------------------------
+# Bug 8 — malformed rule poora ordering band na kare
+# --------------------------------------------------------------------------
+def test_rule_bad_reward_value_rejected_on_create(client, db):
+    """Validation pehle sirf PATCH par thi, POST par nahi — isliye "abc" seedha DB me jata tha."""
+    response = client.post(
+        "/api/rules",
+        json={"name": "BadReward", "trigger": "first_order",
+              "reward": {"type": "percent", "value": "abc"}},
+    )
+    assert response.status_code == 400, response.text
+    assert db.scalar(select(DiscountRule).where(DiscountRule.name == "BadReward")) is None
+
+
+def test_malformed_rule_cannot_break_ordering(db):
+    """DB me kharaab rule ho to bhi order lagna chahiye — engine kabhi raise nahi karega.
+
+    Ye sabse bura wala tha: ek galat rule se HAR order 500 ho jata tha, har customer
+    ke liye, jab tak koi DB me ja kar rule na hataye.
+    """
+    db.add(
+        DiscountRule(
+            code="BROKEN", name="broken rule", trigger="first_order",
+            condition={}, reward={"type": "percent", "value": "abc"},
+            priority=1, is_active=True, message="broken",
+        )
+    )
+    db.commit()
+    body, result = say(db, "919333555555", "2 masala dosa")
+    assert result.intent != "order_invalid"
+    order = db.scalar(select(Order).where(Order.customer_phone == "919333555555"))
+    assert order is not None
+    assert order.total_amount > 0
+
+
+@pytest.mark.parametrize("bad", ["abc", None, [], {}, True, "NaN", "Infinity"])
+def test_discount_engine_helpers_never_raise(bad):
+    """Engine total hona chahiye — bura data aaye to skip kare, crash nahi."""
+    from app.discounts import _as_float, _as_int, reward_percent
+
+    assert _as_float(bad, 7.0) == 7.0
+    assert _as_int(bad, 3) == 3
+
+    class FakeRule:
+        def __init__(self, reward):
+            self.reward = reward
+
+    assert reward_percent(FakeRule({"type": "percent", "value": bad})) == 0.0
+
+
+# --------------------------------------------------------------------------
+# Settings — text field length cap
+# --------------------------------------------------------------------------
+def test_settings_text_too_long_rejected():
+    from app.config import MAX_SETTING_TEXT, Settings
+
+    s = Settings()
+    result = s.apply_overrides({"restaurant": {"name": "x" * (MAX_SETTING_TEXT + 1)}})
+    assert result["rejected"].get("restaurant.name"), "500-char naam accept nahi hona chahiye"

@@ -129,8 +129,11 @@ def build_bill(
         if qty_number != int(qty_number):
             raise ValueError("quantity poori ginti honi chahiye")
         qty = int(qty_number)
-        if qty < 1 or qty > 100:
-            raise ValueError("quantity 1 se 100 ke beech honi chahiye")
+        # yahan hardcoded 100 mat likhna — config ka MAX_ORDER_QTY hi single source of
+        # truth hai. Parser ki clamp aur bill ki validation alag hone par 500 aata tha (B-5).
+        max_qty = int(settings.max_order_qty or 100)
+        if qty < 1 or qty > max_qty:
+            raise ValueError(f"quantity 1 se {max_qty} ke beech honi chahiye")
         unit = q2(raw.get("unit_price", raw.get("price", 0)))
         if unit < 0:
             raise ValueError("price negative nahi ho sakta")

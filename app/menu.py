@@ -224,6 +224,11 @@ class ParsedLine:
 class ParsedOrder:
     lines: list[ParsedLine] = field(default_factory=list)
     unmatched: list[str] = field(default_factory=list)
+    # B-5: qty ko [1, max_qty] me clamp karte waqt badal gaya to True ho jata hai.
+    # Caller isse pakad kar customer ko bata sakta hai — chupke se 500 ya galat
+    # quantity ka bill nahi banta.
+    quantity_out_of_range: bool = False
+    max_qty: int = 100
 
     @property
     def has_items(self) -> bool:
@@ -266,9 +271,19 @@ def _extract_qty(segment: str) -> tuple[int, str]:
     return 1, s
 
 
-def parse_order_text(db: Session, text: str) -> ParsedOrder:
-    """Free text se order banao. Jo item na mile wo `unmatched` me jayega."""
-    result = ParsedOrder()
+def parse_order_text(db: Session, text: str, max_qty: int | None = None) -> ParsedOrder:
+    """Free text se order banao. Jo item na mile wo `unmatched` me jayega.
+
+    `max_qty` na diya jaye to config ka MAX_ORDER_QTY lagta hai — isse parser ki
+    clamp aur `build_bill` ki validation hamesha ek hi limit maanti hain. Alag hone
+    par pehle ValueError uth kar HTTP 500 ban jata tha (B-5).
+    """
+    from .config import settings
+
+    if max_qty is None:
+        max_qty = int(settings.max_order_qty or 100)
+    max_qty = max(1, int(max_qty))
+    result = ParsedOrder(max_qty=max_qty)
     for segment in _split_segments(text):
         if len(segment) < 2:
             continue
@@ -293,11 +308,17 @@ def parse_order_text(db: Session, text: str) -> ParsedOrder:
             else:
                 result.unmatched.append(segment)
                 continue
+        requested_qty = int(qty)
+        clamped_qty = max(1, min(requested_qty, max_qty))
+        if clamped_qty != requested_qty:
+            result.quantity_out_of_range = True
         result.lines.append(
             ParsedLine(
                 menu_item_id=item.id,
                 name=item.name,
-                qty=max(1, int(qty)),
+                # dono taraf clamp: 0/-5 yahan 1 ho jayega tha, par 999999 seedha
+                # build_bill tak ja kar crash karata tha.
+                qty=clamped_qty,
                 unit_price=item.price,
                 matched=True,
                 raw=segment,
