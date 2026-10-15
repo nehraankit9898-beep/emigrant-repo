@@ -7,6 +7,7 @@ Ye file pehle se tay ki gayi table par chalti hai. AI bas bolta hai
 
 from __future__ import annotations
 
+import math
 import secrets
 import string
 from datetime import timedelta
@@ -67,6 +68,40 @@ def active_rules(db: Session) -> list[DiscountRule]:
 
 
 # --------------------------------------------------------------------------
+# Safe value readers — kabhi raise nahi karte
+# --------------------------------------------------------------------------
+def _as_float(value: object, default: float = 0.0) -> float:
+    """float(value) — kabhi raise nahi hota. Galat/ajeeb value par `default`.
+
+    Kyun zaroori hai: rule ka `reward` / `condition` JSON column me kuch bhi save ho
+    sakta hai. Dashboard se galti se "abc" save ho gaya to float("abc") ka ValueError
+    **har order** par uthta tha aur poora ordering band ho jata tha (B-8). Ek bura
+    rule sabke liye order lena band kar deta tha — DB me ja kar hatana padta tha.
+    """
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        out = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    # NaN/Infinity har range check ko pass kar jate hain (NaN < 0 bhi False hota hai)
+    return default if not math.isfinite(out) else out
+
+
+def _as_int(value: object, default: int = 0) -> int:
+    """int(value) — kabhi raise nahi hota. Galat value par `default`."""
+    return int(_as_float(value, float(default)))
+
+
+def reward_percent(rule: DiscountRule) -> float:
+    """Rule ka percent discount, ya 0 (percent rule nahi / value kharaab). Kabhi raise nahi hota."""
+    reward = rule.reward if isinstance(rule.reward, dict) else {}
+    if reward.get("type") != "percent":
+        return 0.0
+    return _as_float(reward.get("value"), 0.0)
+
+
+# --------------------------------------------------------------------------
 # Rule matching
 # --------------------------------------------------------------------------
 def matching_rules(
@@ -80,18 +115,19 @@ def matching_rules(
     order_number = order_number if order_number is not None else (customer.total_orders or 0) + 1
     hits: list[DiscountRule] = []
     for rule in active_rules(db):
-        cond = rule.condition or {}
-        reward = rule.reward or {}
+        # JSON column me dict ke alawa kuch bhi ho sakta hai ("abc", list, None...)
+        cond = rule.condition if isinstance(rule.condition, dict) else {}
+        reward = rule.reward if isinstance(rule.reward, dict) else {}
         if rule.trigger == "first_order" and order_number != 1:
             continue
-        if rule.trigger == "nth_order" and order_number < int(cond.get("order_number", 999)):
+        if rule.trigger == "nth_order" and order_number < _as_int(cond.get("order_number"), 999):
             continue
-        if rule.trigger == "bill_amount" and subtotal < float(cond.get("min_bill", 0)):
+        if rule.trigger == "bill_amount" and subtotal < _as_float(cond.get("min_bill"), 0):
             continue
         if rule.trigger == "birthday" and not is_birthday:
             continue
         if rule.trigger == "winback":
-            days = int(cond.get("days", settings.winback_days))
+            days = _as_int(cond.get("days"), settings.winback_days)
             if not customer.last_visit_at:
                 continue
             from .utils import days_between
@@ -100,7 +136,9 @@ def matching_rules(
                 continue
         if rule.trigger == "thanks":
             continue  # ye alag se, payment ke baad diya jata hai
-        if reward.get("type") == "free_item" and int(cond.get("order_number", 0)) and order_number != int(cond["order_number"]):
+        # pehle int(cond["order_number"]) tha — "abc" hone par KeyError/ValueError se crash
+        nth = _as_int(cond.get("order_number"), 0)
+        if reward.get("type") == "free_item" and nth and order_number != nth:
             continue
         hits.append(rule)
     return hits
@@ -110,9 +148,8 @@ def best_discount(hits: list[DiscountRule]) -> tuple[float, DiscountRule | None]
     """Sabse bada percent discount (ek hi lagta hai — customer ka fayda)."""
     best_percent, best_rule = 0.0, None
     for rule in hits:
-        reward = rule.reward or {}
-        if reward.get("type") == "percent":
-            value = float(reward.get("value", 0) or 0)
+        value = reward_percent(rule)  # kabhi raise nahi hota (B-8)
+        if value > 0:
             if value > best_percent:
                 best_percent, best_rule = value, rule
     return min(best_percent, settings.max_discount_percent), best_rule
@@ -122,7 +159,7 @@ def freebies_from_rules(hits: list[DiscountRule], subtotal: float) -> list[str]:
     """Free item waale rules — item ka naam (ek se zyada na ho)."""
     items: list[str] = []
     for rule in sorted(hits, key=lambda r: r.priority):
-        reward = rule.reward or {}
+        reward = rule.reward if isinstance(rule.reward, dict) else {}
         if reward.get("type") == "free_item":
             item = reward.get("item")
             if item and item not in items:
@@ -200,8 +237,8 @@ def standard_coupon_for(db: Session, rule: DiscountRule, customer_phone: str) ->
     if not existing:
         coupon = Coupon(
             code=rule.code,
-            discount_percent=float((rule.reward or {}).get("value", 0) or 0),
-            free_item_name=(rule.reward or {}).get("item"),
+            discount_percent=reward_percent(rule),
+            free_item_name=(rule.reward if isinstance(rule.reward, dict) else {}).get("item"),
             customer_phone=customer_phone,
             source=rule.trigger,
             expiry_date=utcnow() + timedelta(days=45),
@@ -212,8 +249,8 @@ def standard_coupon_for(db: Session, rule: DiscountRule, customer_phone: str) ->
     # purana use ho gaya to naya banao (code ke aage number lagao)
     return issue_coupon(
         db,
-        percent=float((rule.reward or {}).get("value", 0) or 0),
-        free_item_name=(rule.reward or {}).get("item"),
+        percent=reward_percent(rule),
+        free_item_name=(rule.reward if isinstance(rule.reward, dict) else {}).get("item"),
         source=rule.trigger,
         customer_phone=customer_phone,
     )
@@ -222,7 +259,7 @@ def standard_coupon_for(db: Session, rule: DiscountRule, customer_phone: str) ->
 def thanks_coupon(db: Session, customer: Customer) -> Coupon:
     """Payment ke baad 'agle order me kaam aane wala' code (THANKS5 type)."""
     rule = db.scalar(select(DiscountRule).where(DiscountRule.trigger == "thanks"))
-    percent = float(((rule.reward if rule else {}) or {}).get("value", 5) or 5)
+    percent = reward_percent(rule) if rule else 5.0
     code = _rand_code("THANKS", 6)
     return issue_coupon(db, percent=percent, source="thanks", customer_phone=customer.phone, code=code, valid_days=30)
 

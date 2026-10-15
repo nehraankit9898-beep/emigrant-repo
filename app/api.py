@@ -6,6 +6,7 @@ Saare routes /api ke andar. Agar .env me ADMIN_TOKEN set ho to har request me
 
 from __future__ import annotations
 
+import math
 import re
 import secrets
 from datetime import date, datetime, timedelta
@@ -233,6 +234,74 @@ def list_orders(
     return [_order_row(o) for o in db.scalars(stmt)]
 
 
+# --------------------------------------------------------------------------
+# Dashboard se aane wale numbers — ek hi jagah parse + validate
+# --------------------------------------------------------------------------
+def _num(value, default=0.0, *, minimum=None, maximum=None, integer=False, label="value"):
+    """JSON value se number nikalo; na ban paye to 400 (kabhi 500 nahi).
+
+    Kyun zaroori hai:
+    - `float("abc")` ValueError uthata hai -> bina iske HTTP 500 ban jata tha.
+    - NaN / Infinity har range check ko pass kar jate hain (`NaN < 0` bhi False
+      hota hai), isliye sirf min/max check karna kafi nahi — isfinite zaroori hai.
+    - `bool` int ka subclass hai, to True ko 1 banne se rokna padta hai.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise HTTPException(status_code=400, detail=f"{label} number hona chahiye")
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"{label} number hona chahiye") from None
+    if not math.isfinite(out):
+        raise HTTPException(status_code=400, detail=f"{label} number hona chahiye")
+    if integer:
+        if out != int(out):
+            raise HTTPException(status_code=400, detail=f"{label} poori ginti honi chahiye")
+        out = int(out)
+    if minimum is not None and out < minimum:
+        raise HTTPException(status_code=400, detail=f"{label} {minimum} se kam nahi ho sakta")
+    if maximum is not None and out > maximum:
+        raise HTTPException(status_code=400, detail=f"{label} {maximum} se zyada nahi ho sakta")
+    return out
+
+
+def _parse_quantity(value, label="quantity"):
+    """Dashboard order ki quantity — 1 se settings.max_order_qty ke beech poori ginti."""
+    return _num(value, default=1, minimum=1, maximum=int(settings.max_order_qty or 100),
+                integer=True, label=label)
+
+
+def _validate_rule_reward(reward) -> None:
+    """Rule ka reward DB me jaane se pehle check karo.
+
+    B-8: pehle ye check sirf PATCH (update) par tha, POST (create) par bilkul nahi.
+    To `reward.value = "abc"` seedha DB me chala jata tha aur `best_discount()` har
+    order par `float("abc")` karke crash kar deta tha — poora ordering band ho jata
+    tha, har customer ke liye, jab tak koi DB me ja kar rule na hataye. Isliye
+    create-path par validation sabse zaroori hai.
+    """
+    if not isinstance(reward, dict):
+        raise HTTPException(status_code=400, detail="reward object hona chahiye")
+    kind = reward.get("type")
+    if kind not in {"percent", "free_item"}:
+        raise HTTPException(status_code=400, detail="reward.type 'percent' ya 'free_item' hona chahiye")
+    if kind == "percent":
+        value = reward.get("value")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise HTTPException(status_code=400, detail="percent reward ka value number hona chahiye")
+        if not math.isfinite(float(value)):
+            raise HTTPException(status_code=400, detail="percent reward ka value number hona chahiye")
+        if not 0 <= float(value) <= settings.max_discount_percent:
+            raise HTTPException(
+                status_code=400,
+                detail=f"percent discount 0 se {settings.max_discount_percent} ke beech hona chahiye",
+            )
+    elif not (reward.get("item") or "").strip():
+        raise HTTPException(status_code=400, detail="free_item reward me item ka naam chahiye")
+
+
 @router.post("/orders", dependencies=[Depends(require_admin)])
 def create_manual_order(payload: dict = Body(...), request: Request = None, db: Session = Depends(get_db)):
     """Walk-in / phone order dashboard se daalna (QR/table order bhi)."""
@@ -249,12 +318,20 @@ def create_manual_order(payload: dict = Body(...), request: Request = None, db: 
 
     table = payload.get("table")
     parsed = menu_engine.parse_order_text(db, items_text)
+    # B-5: free text me "999999 dosa" likha to chupke se clamp karke galat quantity ka
+    # bill banana theek nahi — dashboard ko 400 do, operator dekh sake.
+    if parsed.quantity_out_of_range:
+        raise HTTPException(
+            status_code=400,
+            detail=f"quantity 1 se {parsed.max_qty} ke beech honi chahiye (bulk order alag se lijiye)",
+        )
     lines = [{"name": l.name, "qty": l.qty, "unit_price": l.unit_price} for l in parsed.lines if l.matched]
     if not lines and payload.get("items"):
         for row in payload["items"]:
             item = menu_engine.find_item(db, row.get("name", ""))
             if item:
-                lines.append({"name": item.name, "qty": int(row.get("qty", 1)), "unit_price": item.price})
+                lines.append({"name": item.name, "qty": _parse_quantity(row.get("qty", 1)),
+                              "unit_price": item.price})
     if not lines:
         raise HTTPException(status_code=400, detail=f"koi item match nahi hua. Unmatched: {parsed.unmatched}")
 
@@ -386,7 +463,7 @@ def add_menu_item(payload: dict = Body(...), db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="ye item pehle se menu me hai")
     item = MenuItem(
         name=name,
-        price=float(payload.get("price") or 0),
+        price=_num(payload.get("price"), default=0, minimum=0, label="price"),
         category=payload.get("category") or "Other",
         is_veg=bool(payload.get("is_veg", True)),
         is_available=bool(payload.get("is_available", True)),
@@ -409,7 +486,11 @@ def update_menu_item(item_id: int, payload: dict = Body(...), db: Session = Depe
             setattr(item, field, payload[field])
     for field in ("price", "is_veg", "is_available", "is_signature", "sold_count"):
         if payload.get(field) is not None:
-            setattr(item, field, payload[field] if field != "price" else float(payload[field]))
+            setattr(
+                item,
+                field,
+                payload[field] if field != "price" else _num(payload[field], minimum=0, label="price"),
+            )
     if payload.get("aliases") is not None:
         item.aliases = payload["aliases"]
     db.commit()
@@ -465,8 +546,9 @@ def create_rule(payload: dict = Body(...), db: Session = Depends(get_db)):
         reward=payload.get("reward") or {"type": "percent", "value": 5},
         message=payload.get("message"),
         is_active=bool(payload.get("is_active", True)),
-        priority=int(payload.get("priority") or 100),
+        priority=_num(payload.get("priority"), default=100, integer=True, minimum=0, label="priority"),
     )
+    _validate_rule_reward(rule.reward)  # B-8: create path par bhi, sirf update par nahi
     db.add(rule)
     db.flush()
     audit(db, actor="dashboard", action="rule.created", target=f"rule:{rule.id}", details={"name": rule.name, "reward": rule.reward})
@@ -484,10 +566,8 @@ def update_rule(rule_id: int, payload: dict = Body(...), db: Session = Depends(g
         if payload.get(field) is not None:
             setattr(rule, field, payload[field])
             changed.append(field)
-    if rule.reward and (rule.reward.get("type") == "percent"):
-        if not 0 <= float(rule.reward.get("value", 0) or 0) <= settings.max_discount_percent:
-            db.rollback()
-            raise HTTPException(status_code=400, detail=f"percent discount 0 se {settings.max_discount_percent} ke beech")
+    if payload.get("reward") is not None:
+        _validate_rule_reward(rule.reward)
     audit(db, actor="dashboard", action="rule.updated", target=f"rule:{rule.id}", details={"fields": changed})
     db.commit()
     return {"id": rule.id, "updated": True, "is_active": rule.is_active}
@@ -527,19 +607,16 @@ def list_coupons(db: Session = Depends(get_db)):
 
 @router.post("/coupons", dependencies=[Depends(require_admin)])
 def make_coupon(payload: dict = Body(...), db: Session = Depends(get_db)):
-    try:
-        percent = float(payload.get("percent") or 0)
-        valid_days = int(payload.get("valid_days") or 30)
-        min_bill = float(payload.get("min_bill_amount") or 0)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="percent / valid_days / min_bill_amount number hone chahiye")
+    percent = _num(payload.get("percent"), default=0, label="percent")
+    valid_days = _num(payload.get("valid_days"), default=30, integer=True, minimum=1, maximum=3650, label="valid_days")
+    min_bill = _num(payload.get("min_bill_amount"), default=0, minimum=0, label="min_bill_amount")
     if not 0 <= percent <= settings.max_discount_percent:
         raise HTTPException(status_code=400, detail=f"percent 0 se {settings.max_discount_percent} ke beech hona chahiye")
     if not 1 <= valid_days <= 365 or min_bill < 0:
         raise HTTPException(status_code=400, detail="valid_days 1-365 aur min_bill_amount >= 0 hona chahiye")
     coupon = discounts.issue_coupon(
         db,
-        percent=float(payload.get("percent") or 0),
+        percent=percent,
         source=payload.get("source") or "manual",
         customer_phone=clean_phone(payload["phone"]) if payload.get("phone") else None,
         code=(payload.get("code") or None),

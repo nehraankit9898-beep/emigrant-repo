@@ -43,6 +43,10 @@ def _f(key: str, default: float) -> float:
         return default
 
 
+# Dashboard se save hone wale text fields (naam, address, persona...) ki max length
+MAX_SETTING_TEXT = 200
+
+
 def _valid_hhmm(value: str) -> bool:
     """'23:00' / '09:30' — automation ke time fields ka format check."""
     try:
@@ -78,6 +82,9 @@ class Settings:
     max_discount_percent: float = field(default_factory=lambda: _f("MAX_DISCOUNT_PERCENT", 25.0))
     loyalty_points_per_100: int = field(default_factory=lambda: _i("LOYALTY_POINTS_PER_100", 10))
     free_coffee_points: int = field(default_factory=lambda: _i("FREE_COFFEE_POINTS", 500))
+    # Ek order me kitne items ho sakte hain — parser AUR bill dono isi ko use karenge,
+    # taaki dono ki limits kabhi alag na ho (B-5 crash isi wajah se tha).
+    max_order_qty: int = field(default_factory=lambda: _i("MAX_ORDER_QTY", 100))
 
     # ---- whatsapp ----
     whatsapp_mode: str = field(default_factory=lambda: _s("WHATSAPP_MODE", "mock").lower())
@@ -196,6 +203,7 @@ class Settings:
             "max_discount_percent": (float, lambda v: 0 <= v <= 100),
             "loyalty_points_per_100": (int, lambda v: 0 <= v <= 1000),
             "free_coffee_points": (int, lambda v: 1 <= v <= 1_000_000),
+            "max_order_qty": (int, lambda v: 1 <= v <= 10_000),
         },
         "automation": {
             "enabled": (bool, None),
@@ -221,6 +229,7 @@ class Settings:
         ("money", "max_discount_percent"): "max_discount_percent",
         ("money", "loyalty_points_per_100"): "loyalty_points_per_100",
         ("money", "free_coffee_points"): "free_coffee_points",
+        ("money", "max_order_qty"): "max_order_qty",
         ("automation", "enabled"): "automation_enabled",
         ("automation", "owner_report_time"): "owner_report_time",
         ("automation", "birthday_time"): "birthday_time",
@@ -253,6 +262,11 @@ class Settings:
                     continue
                 if validator is not None and not validator(casted):
                     rejected[f"{section}.{key}"] = "range/format galat hai"
+                    continue
+                # text fields par length cap — warna dashboard se 500 char ka
+                # restaurant naam save karke UI/bill bigad sakta hai
+                if isinstance(casted, str) and len(casted) > MAX_SETTING_TEXT:
+                    rejected[f"{section}.{key}"] = f"{MAX_SETTING_TEXT} characters se chhota hona chahiye"
                     continue
                 field_name = self.OVERRIDE_FIELD.get((section, key))
                 if not field_name or not hasattr(self, field_name):

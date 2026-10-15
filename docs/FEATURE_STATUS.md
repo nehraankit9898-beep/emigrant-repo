@@ -70,7 +70,7 @@ Date: 2026-10-15 · Branch: `arena/dd5271e6-emigrant-repo` (base `main@e1aef9d`)
 | 45 | LLM (live provider) | **BLOCKED_EXTERNAL_SETUP** | Needs API key | — |
 | 46 | LLM prompt isolation against injection | **PARTIAL** | Server recomputes prices and validates items; no prompt sandboxing | Customer text is not delimited/isolated in prompt |
 | 47 | LLM fallback to demo brain | **WORKING_VERIFIED** | demo flows run | — |
-| 48 | Settings API (`PUT /api/settings`) | **WORKING_VERIFIED** | `test_billing_regressions`: saved overrides apply immediately (`gst_percent` 5→18 shows in the next bill), reload from DB on restart, invalid values rejected (`rejected` in response, nothing changes) | Still per-deployment (not per-tenant); `templates` section stored but unused |
+| 48 | Settings API (`PUT /api/settings`) | **WORKING_VERIFIED** | `test_billing_regressions`: saved overrides apply immediately (`gst_percent` 5→18 shows in the next bill), reload from DB on restart, invalid values rejected (`rejected` in response, nothing changes), over-long text rejected (200-char cap) | Still per-deployment (not per-tenant); `templates` section stored but unused |
 | 49 | Rate limiting | **NOT_IMPLEMENTED** | none | Add at proxy or middleware |
 | 50 | Outbox / demo WhatsApp payload views | **MOCK_ONLY** | admin-gated | Demo-only data views |
 | 51 | Owner / user documentation | **PARTIAL** | `docs/OWNER-DEMO-SCRIPT.md`, `docs/API-SETUP-GUIDE.md` (existing) | Setup guide not re-verified line by line |
@@ -100,6 +100,31 @@ Migration notes: `0003` is non-destructive and idempotent, back-fills legacy row
 `app.database.add_missing_columns()` additionally lets an existing **dev** database gain new
 columns instead of crashing with *"no such column"* (production schema remains migration-only).
 Verified: 46 pre-existing demo orders all rebuild to their exact stored totals.
+
+### Crash-class defects (second sweep — malformed input)
+
+Found by firing ~93 malformed/garbage payloads at the running server. All four were
+**HTTP 500 crashes**, all pre-existing, and all reachable from ordinary user input
+rather than exotic attacks.
+
+| # | Defect | Trigger | Fix |
+|---|---|---|---|
+| B-5 | Order quantity outside 1–100 crashed the request | Customer types *"50000 paneer tikka"* on WhatsApp, or a dashboard order with `qty` 0 / −3 / 999999 | `MAX_ORDER_QTY` in config — single source of truth for the parser **and** the bill check, so they cannot drift; parser clamps + flags `quantity_out_of_range`; chat replies in Hinglish, API returns 400 |
+| B-6 | Non-numeric menu price crashed | Menu tab `price: "abc"` (add **and** edit). `NaN` passed every range check (`NaN < 0` is False) and produced a NOT NULL constraint failure on insert | shared `_num()` parser → 400; rejects non-numeric, negative, NaN, Infinity |
+| B-7 | Non-numeric rule `priority` crashed | `POST /api/rules` with `priority: "abc"` | same `_num()` → 400 |
+| B-8 | **A malformed discount rule took ordering offline for every customer** | Save a rule with `reward.value: "abc"` — validation existed on *update* only, not *create*, so `float("abc")` then raised in `best_discount()` on **every** order | validated on create too; `_as_float`/`_as_int` make the discount engine **total** (never raises), so a bad rule is skipped instead of crashing |
+
+**B-8 was the most severe defect found in this pass.** One bad rule saved from the
+dashboard stopped all ordering for all customers until someone edited the database by
+hand. The engine is now total: a malformed rule can no longer stop ordering.
+
+Root cause of all four: `float()` / `int()` applied directly to user-supplied JSON with
+no validation, on code paths where a `ValueError` becomes an unhandled 500 — and in
+B-8's case on the hot path that every order travels through.
+
+Verified after the fix: **93/93 malformed payloads return clean 2xx/4xx, zero 5xx**
+(was 6 crashes). Each new test fails on the unfixed code with the exact
+`ValueError` / `TypeError`, and passes after.
 
 ## Summary counts (computed from the table above)
 

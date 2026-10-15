@@ -341,6 +341,23 @@ def _handle_order(db: Session, customer: Customer, text: str, last_intent: str |
         )
         return [Reply(text=reply_text, intent="order_unclear")]
 
+    # B-5: quantity clamp hui hai to customer ko batana zaroori hai. Pehle ye case
+    # build_bill ke ValueError tak jaata tha -> HTTP 500, customer ko koi jawab nahi
+    # (WhatsApp dobara bhejta hai). Chupke se 100 dosa ka bill banana bhi galat hai.
+    if parsed.quantity_out_of_range:
+        summary = menu_engine.order_summary_text(parsed.lines)
+        return [
+            Reply(
+                text=(
+                    f"Sir, ek order me zyada se zyada *{parsed.max_qty}* plate ho sakti hain 🙂\n"
+                    f"Maine *{summary}* maan liya hai.\n\n"
+                    f"Isse bade order ke liye {settings.restaurant_phone} par call kar dijiye — "
+                    f"party/bulk booking ka arrangement ham karwa dete hain 🎉"
+                ),
+                intent="order_qty_out_of_range",
+            )
+        ]
+
     subtotal = parsed.subtotal
     pending_count = db.scalar(
         select(func.count(Order.id)).where(
@@ -375,17 +392,23 @@ def _handle_order(db: Session, customer: Customer, text: str, last_intent: str |
     ]
 
     is_cod = bool(re.search(r"\bcod\b|cash|counter|pay at|baad me paisa|offline pay", text, re.IGNORECASE))
-    order, bill = create_order(
-        db,
-        customer,
-        lines,
-        discount_percent=percent,
-        discount_code=code,
-        discount_reason=reason,
-        freebies=freebies_for_order,
-        is_cod=is_cod,
-        notes="repeat order" if repeat else None,
-    )
+    try:
+        order, bill = create_order(
+            db,
+            customer,
+            lines,
+            discount_percent=percent,
+            discount_code=code,
+            discount_reason=reason,
+            freebies=freebies_for_order,
+            is_cod=is_cod,
+            notes="repeat order" if repeat else None,
+        )
+    except ValueError as exc:
+        # Quantity/price kisi bhi wajah se range se bahar — 500 dene ke bajay
+        # customer ko samajh aa jayega ki kya theek karna hai.
+        db.rollback()
+        return [Reply(text=f"Sir, {exc} 🙏 Order thoda theek kar ke dobara bhejiye.", intent="order_invalid")]
     if claimed_coupon is not None:
         pricing.attach_coupon_to_order(db, claimed_coupon, order.id)
     if code:
