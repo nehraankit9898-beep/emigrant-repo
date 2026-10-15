@@ -143,7 +143,8 @@
       <div class="grow"></div>
       <button class="btn" onclick="refresh()">↻ Refresh</button>
       <button class="btn amber" onclick="runAutomation()">⚡ Run due tasks</button>
-      <button class="btn red" onclick="resetDemo()">🧪 Reset demo data</button>
+      <button class="btn" onclick="setAdminToken()" title="Dashboard admin token (session me save hota hai)">🔑 Token</button>
+      <button class="btn red" onclick="resetDemo()" title="Sirf demo/development mode me chalta hai">🧪 Reset demo data</button>
     </div>
     <div id="view"></div>
   </main>
@@ -153,7 +154,18 @@
 <script>
 /* ============================ helpers ============================ */
 const qs = new URLSearchParams(location.search);
-const TOKEN = qs.get("token") || "";
+// Admin token: sirf sessionStorage me, sirf header me bheja jata hai (URL me kabhi nahi — logs/history me leak na ho)
+if (qs.get("token")) {  // purana link (?token=) — token uthao aur URL se hata do
+  sessionStorage.setItem("adminToken", qs.get("token"));
+  const clean = new URL(location.href); clean.searchParams.delete("token"); history.replaceState(null, "", clean.toString());
+}
+let TOKEN = sessionStorage.getItem("adminToken") || "";
+function setAdminToken(){
+  const t = prompt("Dashboard admin token daalein (ADMIN_TOKEN jo .env me hai):", TOKEN || "");
+  if (t === null) return;
+  TOKEN = t.trim(); if (TOKEN) sessionStorage.setItem("adminToken", TOKEN); else sessionStorage.removeItem("adminToken");
+  refresh();
+}
 const PAGE = qs.get("page") || "overview";
 const TABS = [
   ["overview","📊","Overview"],["chat","💬","Live Chat"],["orders","🧾","Orders"],["menu","📖","Menu"],
@@ -165,10 +177,14 @@ let STATE = { page: PAGE, summary: null, chatPhone: qs.get("phone") || "91987654
 function api(path, opts={}){
   const headers = Object.assign({"Content-Type":"application/json"}, opts.headers||{});
   if (TOKEN) headers["X-Admin-Token"] = TOKEN;
-  const url = path + (path.includes("?") ? "&" : "?") + (TOKEN ? "token="+encodeURIComponent(TOKEN) : "");
-  return fetch(url, Object.assign({}, opts, {headers}))
+  return fetch(path, Object.assign({}, opts, {headers}))
     .then(async r => { const t = await r.text(); let d; try { d = t? JSON.parse(t): null } catch(e){ d = t }
-      if(!r.ok) throw new Error((d && d.detail) ? d.detail : ("HTTP "+r.status)); return d; });
+      if(!r.ok){
+        const detail = (d && d.detail) ? (typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail)) : ("HTTP "+r.status);
+        if (r.status === 401) throw new Error(detail + " — upar 🔑 Token se sahi token daalein");
+        throw new Error(detail);
+      }
+      return d; });
 }
 function toast(msg, err=false){
   const el = document.getElementById("toast");
@@ -346,7 +362,7 @@ async function viewOrders(){
     <td><span class="pill">${esc(o.order_status)}</span></td>
     <td class="tiny muted">${esc(o.at||"")}</td>
     <td class="tiny">
-      ${o.payment_status!=="paid"? `<button class="btn sm" onclick="markPaid('${esc(o.order_no)}')">💰 Paid</button>`:""}
+      ${o.payment_status!=="paid"? `<button class="btn sm" title="Demo mode me mock payment ko paid mark karta hai (live mode me server block karta hai)" onclick="markPaid('${esc(o.order_no)}')">💰 Paid</button>`:""}
       ${o.payment_status==="pending" && o.payment_link? `<a class="btn sm" href="${esc(o.payment_link)}" target="_blank">🔗 Pay page</a>`:""}
       <button class="btn sm" onclick="setStatus('${esc(o.order_no)}','preparing')">👨‍🍳</button>
       <button class="btn sm" onclick="setStatus('${esc(o.order_no)}','out_for_delivery')">🛵</button>
@@ -386,7 +402,7 @@ async function createOrder(){
     render();
   }catch(e){ toast("Error: "+e.message, true); }
 }
-async function markPaid(order_no){ try{ await api("/api/demo/simulate-payment/"+order_no, {method:"POST"}); toast("Payment mil gaya ✅ thanks message chala gaya"); render(); }catch(e){ toast(e.message, true); } }
+async function markPaid(order_no){ if(!confirm("DEMO: is order ko paid mark karein? (Live payment me ye block hota hai)")) return; try{ const r = await api("/api/demo/simulate-payment/"+order_no, {method:"POST"}); toast(r.paid ? "Demo payment ✅ — thanks message chala gaya" : "Payment already paid tha"); render(); }catch(e){ toast(e.message, true); } }
 async function setStatus(order_no, status){ try{ await api("/api/orders/"+order_no, {method:"PATCH", body: JSON.stringify({order_status: status})}); toast("Status "+status+" — customer ko update chala gaya"); render(); }catch(e){ toast(e.message, true); } }
 
 async function viewMenu(){
@@ -581,8 +597,7 @@ async function viewCampaigns(){
     <label>Broadcast message (sab opt-in customers ko)</label>
     <textarea id="bcMsg" rows="3" placeholder="Aaj ka special: Buy 1 Get 1 Pizza 🍕 Sirf aaj ke liye!">Aaj ka special: Buy 1 Get 1 Pizza 🍕 Sirf aaj ke liye!</textarea>
     <div class="row" style="margin-top:9px">
-      <button class="btn primary fix" onclick="broadcast(false)">📣 Sirf opt-in ko bhejo (safe)</button>
-      <button class="btn red fix" onclick="broadcast(true)">⚠️ Sabko bhejo (spam risk — demo only)</button>
+      <button class="btn primary fix" onclick="broadcast()">📣 Opt-in customers ko bhejo</button>
     </div>
     <div class="tiny muted" style="margin-top:8px">Meta ka rule: bina permission offer bhejne se number ki quality girti hai. Isliye default sirf opt-in wale.</div>
   </div>
@@ -596,9 +611,10 @@ async function runCampaign(kind){
   try{ const r = await api("/api/campaigns/"+kind, {method:"POST"}); toast(`${kind}: ${r.sent} bheje, ${r.skipped} skip`); render(); }
   catch(e){ toast(e.message,true); }
 }
-async function broadcast(force){
+async function broadcast(){
   const message = document.getElementById("bcMsg").value.trim(); if(!message) return toast("Message khaali hai", true);
-  try{ const r = await api("/api/campaigns/broadcast", {method:"POST", body: JSON.stringify({message, only_opt_in: !force, force})});
+  if(!confirm("Ye message sirf opt-in (permission wale) customers ko jayega. Bhejein?")) return;
+  try{ const r = await api("/api/campaigns/broadcast", {method:"POST", body: JSON.stringify({message})});
     toast(`Broadcast: ${r.sent} bheje / ${r.audience} audience`); render(); }catch(e){ toast(e.message,true); }
 }
 

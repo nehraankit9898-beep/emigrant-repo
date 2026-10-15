@@ -6,6 +6,8 @@ Saare routes /api ke andar. Agar .env me ADMIN_TOKEN set ho to har request me
 
 from __future__ import annotations
 
+import re
+import secrets
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -13,10 +15,11 @@ from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Requ
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import automations, discounts, memory, menu as menu_engine, orchestrator, reports, seed, whatsapp
+from . import automations, discounts, memory, menu as menu_engine, orchestrator, payments, reports, reservations, seed, whatsapp
 from .config import settings
 from .database import get_db
 from .llm import build_system_prompt
+from .security import audit, constant_time_equals
 from .models import (
     Alert,
     AppSetting,
@@ -40,11 +43,24 @@ router = APIRouter(prefix="/api", tags=["dashboard"])
 # Auth (demo me optional)
 # --------------------------------------------------------------------------
 def require_admin(request: Request, x_admin_token: str | None = Header(default=None)) -> None:
-    if not settings.admin_token:
+    """API gate. Token sirf header me (X-Admin-Token ya Authorization: Bearer).
+
+    * ADMIN_TOKEN set hai -> token mila-na zaroori (constant-time compare). URL query/cookie se token NAHI.
+    * ADMIN_TOKEN khaali + production -> 503 (fail-closed).
+    * ADMIN_TOKEN khaali + development/demo -> open (sirf local demo ke liye; docs/SECURITY_AUDIT.md dekhein).
+    """
+    expected = settings.admin_token
+    if not expected:
+        if settings.is_production:
+            raise HTTPException(status_code=503, detail="ADMIN_TOKEN set nahi hai — production me dashboard API band hai")
         return
-    token = x_admin_token or request.query_params.get("token") or request.cookies.get("admin_token")
-    if token != settings.admin_token:
-        raise HTTPException(status_code=401, detail="Admin token galat hai (X-Admin-Token header bhejiye)")
+    provided = x_admin_token
+    if not provided:
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            provided = auth[7:].strip()
+    if not constant_time_equals(provided, expected):
+        raise HTTPException(status_code=401, detail="Admin token galat hai ya nahi bheja gaya (X-Admin-Token header)")
 
 
 def _request_base(request: Request | None) -> str | None:
@@ -205,10 +221,11 @@ def _order_row(order: Order) -> dict:
 def list_orders(
     status: str | None = None,
     payment: str | None = None,
-    limit: int = 100,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    stmt = select(Order).order_by(Order.id.desc()).limit(min(limit, 500))
+    stmt = select(Order).order_by(Order.id.desc()).limit(limit).offset(offset)
     if status:
         stmt = stmt.where(Order.order_status == status)
     if payment:
@@ -225,7 +242,7 @@ def create_manual_order(payload: dict = Body(...), request: Request = None, db: 
     if not phone and not name:
         raise HTTPException(status_code=400, detail="phone ya naam chahiye")
     if not phone:
-        phone = "9199999" + str(abs(hash(name)) % 100000)
+        phone = f"99999{secrets.randbelow(10**9):09d}"  # walk-in placeholder (unique-ish, deterministic nahi)
     customer, _ = memory.get_or_create_customer(db, phone, name)
     if name:
         memory.remember_name(db, customer, name)
@@ -245,9 +262,16 @@ def create_manual_order(payload: dict = Body(...), request: Request = None, db: 
     decision = discounts.evaluate_for_order(db, customer, subtotal)
     is_cod = bool(payload.get("cod"))
     if payload.get("discount_percent") is not None:
-        decision["percent"] = float(payload["discount_percent"])
+        try:
+            manual = float(payload["discount_percent"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="discount_percent number hona chahiye")
+        if not 0 <= manual <= settings.max_discount_percent:
+            raise HTTPException(status_code=400, detail=f"discount 0 se {settings.max_discount_percent}% ke beech hona chahiye")
+        decision["percent"] = manual
         decision["code"] = payload.get("discount_code") or decision["code"]
         decision["reason"] = "Manual (owner)"
+        audit(db, actor="dashboard", action="order.manual_discount", target=f"phone:{phone}", details={"percent": manual})
     percent = min(float(decision["percent"] or 0), settings.max_discount_percent)
     order, bill = orchestrator.create_order(
         db,
@@ -278,21 +302,38 @@ def create_manual_order(payload: dict = Body(...), request: Request = None, db: 
 
 @router.patch("/orders/{order_no}", dependencies=[Depends(require_admin)])
 def update_order(order_no: str, payload: dict = Body(...), db: Session = Depends(get_db)):
+    """Order status (validated transition) aur payment confirm.
+
+    Payment 'paid' sirf mock/demo mode me manually (audit ke saath). Live mode me sirf provider webhook.
+    """
     order = db.scalar(select(Order).where(Order.order_no == str(order_no)))
     if not order:
         raise HTTPException(status_code=404, detail="order nahi mila")
-    if payload.get("order_status"):
-        orchestrator.advance_order_status(db, order, payload["order_status"], deliver_reply=bool(payload.get("notify", True)))
+    new_status = payload.get("order_status")
+    if new_status:
+        if new_status not in orchestrator.ORDER_STATUSES:
+            raise HTTPException(status_code=400, detail=f"order_status galat hai. Allowed: {sorted(orchestrator.ORDER_STATUSES)}")
+        try:
+            orchestrator.advance_order_status(db, order, str(new_status), deliver_reply=bool(payload.get("notify", True)), actor="dashboard")
+        except orchestrator.OrderTransitionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+    if payload.get("payment_status") not in (None, "", "paid"):
+        raise HTTPException(status_code=400, detail="payment_status sirf 'paid' ho sakta hai")
     if payload.get("payment_status") == "paid" or payload.get("mark_paid"):
+        if settings.payment_live:
+            raise HTTPException(status_code=409, detail="live mode me payment sirf Razorpay webhook se confirm hota hai")
         payment = db.scalar(select(Payment).where(Payment.order_id == order.id).order_by(Payment.id.desc()))
+        if payment and payment.provider != "mock":
+            raise HTTPException(status_code=409, detail="is payment provider ka manual confirm allowed nahi")
         if payment:
-            from . import payments as pay_engine
-
-            pay_engine.mark_paid(db, payment, via="dashboard")
-            orchestrator.on_payment_success(db, order, via="dashboard")
-        else:
+            settled = payments.settle_payment(db, payment, via="demo_dashboard")
+            if settled:
+                audit(db, actor="demo:dashboard", action="demo.manual_mark_paid", target=f"order:{order.order_no}")
+                orchestrator.on_payment_success(db, order, via="dashboard")
+        elif order.payment_status != "paid":
             order.payment_status = "paid"
             order.paid_at = utcnow()
+            audit(db, actor="demo:dashboard", action="demo.manual_mark_paid", target=f"order:{order.order_no}")
             memory.apply_order_to_memory(db, memory.get_or_create_customer(db, order.customer_phone)[0], order)
     db.commit()
     return _order_row(order)
@@ -432,6 +473,8 @@ def create_rule(payload: dict = Body(...), db: Session = Depends(get_db)):
         priority=int(payload.get("priority") or 100),
     )
     db.add(rule)
+    db.flush()
+    audit(db, actor="dashboard", action="rule.created", target=f"rule:{rule.id}", details={"name": rule.name, "reward": rule.reward})
     db.commit()
     return {"id": rule.id, "name": rule.name}
 
@@ -441,9 +484,16 @@ def update_rule(rule_id: int, payload: dict = Body(...), db: Session = Depends(g
     rule = db.get(DiscountRule, rule_id)
     if not rule:
         raise HTTPException(status_code=404, detail="rule nahi mila")
+    changed = []
     for field in ("code", "name", "trigger", "condition", "reward", "message", "is_active", "priority"):
         if payload.get(field) is not None:
             setattr(rule, field, payload[field])
+            changed.append(field)
+    if rule.reward and (rule.reward.get("type") == "percent"):
+        if not 0 <= float(rule.reward.get("value", 0) or 0) <= settings.max_discount_percent:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=f"percent discount 0 se {settings.max_discount_percent} ke beech")
+    audit(db, actor="dashboard", action="rule.updated", target=f"rule:{rule.id}", details={"fields": changed})
     db.commit()
     return {"id": rule.id, "updated": True, "is_active": rule.is_active}
 
@@ -453,6 +503,7 @@ def delete_rule(rule_id: int, db: Session = Depends(get_db)):
     rule = db.get(DiscountRule, rule_id)
     if not rule:
         raise HTTPException(status_code=404, detail="rule nahi mila")
+    audit(db, actor="dashboard", action="rule.deleted", target=f"rule:{rule.id}", details={"name": rule.name})
     db.delete(rule)
     db.commit()
     return {"deleted": True}
@@ -481,6 +532,16 @@ def list_coupons(db: Session = Depends(get_db)):
 
 @router.post("/coupons", dependencies=[Depends(require_admin)])
 def make_coupon(payload: dict = Body(...), db: Session = Depends(get_db)):
+    try:
+        percent = float(payload.get("percent") or 0)
+        valid_days = int(payload.get("valid_days") or 30)
+        min_bill = float(payload.get("min_bill_amount") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="percent / valid_days / min_bill_amount number hone chahiye")
+    if not 0 <= percent <= settings.max_discount_percent:
+        raise HTTPException(status_code=400, detail=f"percent 0 se {settings.max_discount_percent} ke beech hona chahiye")
+    if not 1 <= valid_days <= 365 or min_bill < 0:
+        raise HTTPException(status_code=400, detail="valid_days 1-365 aur min_bill_amount >= 0 hona chahiye")
     coupon = discounts.issue_coupon(
         db,
         percent=float(payload.get("percent") or 0),
@@ -488,9 +549,10 @@ def make_coupon(payload: dict = Body(...), db: Session = Depends(get_db)):
         customer_phone=clean_phone(payload["phone"]) if payload.get("phone") else None,
         code=(payload.get("code") or None),
         free_item_name=payload.get("free_item"),
-        valid_days=int(payload.get("valid_days") or 30),
-        min_bill_amount=float(payload.get("min_bill_amount") or 0),
+        valid_days=valid_days,
+        min_bill_amount=min_bill,
     )
+    audit(db, actor="dashboard", action="coupon.created", target=f"coupon:{coupon.code}", details={"percent": percent, "source": coupon.source})
     db.commit()
     return {"code": coupon.code, "percent": coupon.discount_percent, "free_item": coupon.free_item_name}
 
@@ -533,24 +595,38 @@ def customer_detail(phone: str, db: Session = Depends(get_db)):
 
 @router.patch("/customers/{phone}", dependencies=[Depends(require_admin)])
 def update_customer(phone: str, payload: dict = Body(...), db: Session = Depends(get_db)):
+    """Customer ka profile / consent / block. Consent badalna audit hota hai."""
     customer = memory.get_customer(db, phone)
     if not customer:
         raise HTTPException(status_code=404, detail="customer nahi mila")
     if payload.get("name"):
         memory.remember_name(db, customer, title_name(payload["name"]) or "")
     if payload.get("birthday"):
-        customer.birthday = payload["birthday"]
+        birthday = str(payload["birthday"]).strip()
+        if not re.fullmatch(r"(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])", birthday):
+            raise HTTPException(status_code=400, detail="birthday MM-DD format me hona chahiye")
+        customer.birthday = birthday
     if payload.get("note"):
-        memory.remember_note(customer, payload["note"])
+        memory.remember_note(customer, str(payload["note"])[:200])
     if payload.get("human_mode") is not None:
         customer.human_mode = bool(payload["human_mode"])
     if payload.get("opt_in") is not None:
+        previous = bool(customer.opt_in)
         customer.opt_in = bool(payload["opt_in"])
         customer.opted_out = not bool(payload["opt_in"])
+        audit(db, actor="dashboard", action="consent.changed", target=f"customer:{customer.id}", details={"opt_in": {"from": previous, "to": customer.opt_in}})
     if payload.get("blocked") is not None:
         customer.blocked = bool(payload["blocked"])
-    if payload.get("add_points"):
-        customer.loyalty_points = int(customer.loyalty_points or 0) + int(payload["add_points"])
+        audit(db, actor="dashboard", action="customer.blocked_changed", target=f"customer:{customer.id}", details={"blocked": customer.blocked})
+    if payload.get("add_points") not in (None, ""):
+        try:
+            points = int(payload["add_points"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="add_points integer hona chahiye")
+        if not -10000 <= points <= 10000:
+            raise HTTPException(status_code=400, detail="add_points -10000 se 10000 ke beech")
+        customer.loyalty_points = max(0, int(customer.loyalty_points or 0) + points)
+        audit(db, actor="dashboard", action="loyalty.adjusted", target=f"customer:{customer.id}", details={"points": points})
     db.commit()
     return memory.customer_context(db, customer)
 
@@ -581,32 +657,38 @@ def list_reservations(upcoming: bool = False, db: Session = Depends(get_db)):
 
 @router.post("/reservations", dependencies=[Depends(require_admin)])
 def create_reservation(payload: dict = Body(...), db: Session = Depends(get_db)):
-    """Owner/staff khud booking daal sake (phone call par aayi booking)."""
+    """Owner/staff khud booking daal sake (phone call par aayi booking). Capacity + date check hota hai."""
     phone = clean_phone(payload.get("phone") or "")
     name = payload.get("name")
     if not phone:
         if not name:
             raise HTTPException(status_code=400, detail="phone ya naam chahiye")
-        phone = "9199998" + str(abs(hash(name)) % 100000)
+        phone = f"99998{secrets.randbelow(10**9):09d}"
+    try:
+        day = reservations.parse_date(payload.get("date"), today_ist_date())
+        time_str = reservations.normalize_time(payload.get("time") or "19:00")
+        persons = reservations.parse_persons(payload.get("persons"))
+    except reservations.ReservationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     customer, _ = memory.get_or_create_customer(db, phone, name)
     if name:
         memory.remember_name(db, customer, title_name(name) or "")
     try:
-        day = date.fromisoformat(payload.get("date") or str(today_ist_date()))
-    except ValueError:
-        raise HTTPException(status_code=400, detail="date format YYYY-MM-DD hona chahiye")
-    reservation = Reservation(
-        customer_phone=phone,
-        customer_name=customer.name,
-        date=day,
-        time=payload.get("time") or "19:00",
-        persons=int(payload.get("persons") or 2),
-        status="confirmed",
-        notes=payload.get("notes"),
-    )
-    db.add(reservation)
+        reservation = reservations.create_reservation(
+            db,
+            phone=phone,
+            name=customer.name,
+            day=day,
+            time_str=time_str,
+            persons=persons,
+            notes=payload.get("notes"),
+        )
+    except reservations.CapacityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc))
+    audit(db, actor="dashboard", action="reservation.created", target=f"reservation:{reservation.id}", details={"date": str(day), "time": time_str, "persons": persons})
     db.commit()
-    return {"id": reservation.id, "date": str(reservation.date), "time": reservation.time}
+    return {"id": reservation.id, "date": str(reservation.date), "time": reservation.time, "status": reservation.status}
 
 
 @router.patch("/reservations/{reservation_id}", dependencies=[Depends(require_admin)])
@@ -614,8 +696,19 @@ def update_reservation(reservation_id: int, payload: dict = Body(...), db: Sessi
     reservation = db.get(Reservation, reservation_id)
     if not reservation:
         raise HTTPException(status_code=404, detail="booking nahi mili")
-    if payload.get("status"):
-        reservation.status = payload["status"]
+    new_status = payload.get("status")
+    if new_status is not None:
+        if new_status not in reservations.RESERVATION_STATUSES:
+            raise HTTPException(status_code=400, detail="status confirmed | cancelled | done | no_show ho sakta hai")
+        if new_status == "confirmed" and reservation.status != "confirmed":
+            try:
+                reservations.check_capacity(db, reservation.date, reservation.time, reservation.persons)
+            except reservations.CapacityError as exc:
+                db.rollback()
+                raise HTTPException(status_code=409, detail=str(exc))
+        previous = reservation.status
+        reservation.status = new_status
+        audit(db, actor="dashboard", action="reservation.status_changed", target=f"reservation:{reservation.id}", details={"from": previous, "to": new_status})
     if payload.get("notify"):
         text = {
             "cancelled": "Sir aapki table booking cancel kar di gayi hai. Koi baat nahi, agli baar 😄",
@@ -628,8 +721,6 @@ def update_reservation(reservation_id: int, payload: dict = Body(...), db: Sessi
     return {"id": reservation.id, "status": reservation.status}
 
 
-# --------------------------------------------------------------------------
-# Feedback & alerts
 # --------------------------------------------------------------------------
 @router.get("/feedback", dependencies=[Depends(require_admin)])
 def list_feedback(db: Session = Depends(get_db)):
@@ -701,6 +792,7 @@ def list_campaigns(db: Session = Depends(get_db)):
 @router.post("/campaigns/birthday", dependencies=[Depends(require_admin)])
 def run_birthday(db: Session = Depends(get_db)):
     result = automations.send_birthday_wishes(db)
+    audit(db, actor="dashboard", action="campaign.birthday_run", details={"sent": result["sent"], "skipped": result["skipped"]})
     db.commit()
     return result
 
@@ -708,6 +800,7 @@ def run_birthday(db: Session = Depends(get_db)):
 @router.post("/campaigns/winback", dependencies=[Depends(require_admin)])
 def run_winback(force: bool = False, db: Session = Depends(get_db)):
     result = automations.send_winback_offers(db, force=force)
+    audit(db, actor="dashboard", action="campaign.winback_run", details={"sent": result["sent"], "skipped": result["skipped"]})
     db.commit()
     return result
 
@@ -717,7 +810,9 @@ def run_broadcast(payload: dict = Body(...), db: Session = Depends(get_db)):
     message = (payload.get("message") or "").strip()
     if not message:
         raise HTTPException(status_code=400, detail="message khaali hai")
-    result = automations.send_broadcast(db, message, only_opt_in=bool(payload.get("only_opt_in", True)))
+    # Consent non-negotiable: only_opt_in browser se bypass nahi ho sakta (automations me hamesha opt-in)
+    result = automations.send_broadcast(db, message, only_opt_in=True)
+    audit(db, actor="dashboard", action="campaign.broadcast", target=f"campaign:{result['campaign_id']}", details={"sent": result["sent"], "skipped": result["skipped"]})
     db.commit()
     return result
 
@@ -838,6 +933,7 @@ def update_settings(payload: dict = Body(...), db: Session = Depends(get_db)):
     if "restaurant" in payload and payload["restaurant"]:
         settings.google_review_link = payload["restaurant"].get("google_review_link", settings.google_review_link)
         settings.restaurant_hours = payload["restaurant"].get("hours", settings.restaurant_hours)
+    audit(db, actor="dashboard", action="settings.updated", details={"sections": sorted(saved.keys())})
     db.commit()
     return {"saved": saved}
 
@@ -852,28 +948,31 @@ def get_prompt():
 # --------------------------------------------------------------------------
 @router.post("/demo/reset", dependencies=[Depends(require_admin)])
 def demo_reset(db: Session = Depends(get_db)):
+    """DEMO ONLY — poora data delete karta hai. Production / live payment me band."""
+    if settings.is_production or settings.payment_live:
+        raise HTTPException(status_code=409, detail="demo reset production/live mode me allowed nahi")
     result = seed.reset_demo(db)
     return {"reset": True, "result": result}
 
 
 @router.post("/demo/simulate-payment/{order_no}", dependencies=[Depends(require_admin)])
 def simulate_payment(order_no: str, db: Session = Depends(get_db)):
+    """DEMO ONLY: mock payment ko paid mark karta hai. Live mode / non-mock payment par band."""
+    if settings.payment_live or settings.is_production:
+        raise HTTPException(status_code=409, detail="demo payment simulation live/production me allowed nahi")
     order = db.scalar(select(Order).where(Order.order_no == str(order_no)))
     if not order:
         raise HTTPException(status_code=404, detail="order nahi mila")
-    from . import payments as pay_engine
-
     payment = db.scalar(select(Payment).where(Payment.order_id == order.id).order_by(Payment.id.desc()))
     if not payment:
-        bill = orchestrator.build_bill(
-            db,
-            [dict(name=row.get("name"), qty=row.get("qty", 1), unit_price=row.get("price", 0)) for row in (order.items or [])],
-        )
-        payment = pay_engine.create_payment(db, order, base_url=None)
-    pay_engine.mark_paid(db, payment, via="dashboard_simulate")
-    replies = orchestrator.on_payment_success(db, order, via="dashboard_simulate")
+        payment = payments.create_payment(db, order, base_url=None)
+    if payment.provider != "mock":
+        raise HTTPException(status_code=409, detail="sirf mock payment simulate ho sakta hai")
+    settled = payments.settle_payment(db, payment, via="demo_simulate")
+    replies = orchestrator.on_payment_success(db, order, via="dashboard_simulate") if settled else []
+    audit(db, actor="demo:dashboard", action="demo.simulate_payment", target=f"order:{order.order_no}", details={"settled": settled})
     db.commit()
-    return {"paid": True, "replies": [r.text for r in replies]}
+    return {"paid": settled, "demo": True, "replies": [r.text for r in replies]}
 
 
 @router.get("/demo/whatsapp-payload", dependencies=[Depends(require_admin)])

@@ -18,8 +18,8 @@ from sqlalchemy.orm import Session
 
 from . import discounts, memory, orchestrator, reports, whatsapp
 from .config import settings
-from .models import Campaign, Coupon, Customer, Message, Order, Reservation
-from .utils import now_ist, rupees, today_ist_date, truncate, utcnow
+from .models import Campaign, Customer, Message, Order, Reservation
+from .utils import now_ist, today_ist_date, utcnow
 
 # order kanha se kanha jayega (minute = order confirm hone ke kitne minute baad)
 STATUS_FLOW: list[tuple[str, int]] = [
@@ -42,6 +42,14 @@ def _already_today(db: Session, phone: str, intent: str) -> bool:
     return row is not None
 
 
+def can_receive_marketing(customer: Customer) -> bool:
+    """Marketing (birthday offer, winback, broadcast) ke liye SEND-TIME check.
+
+    Opt-in zaroori hai; STOP (opted_out) ya block hone par kabhi nahi. Force flag isse override nahi karta.
+    """
+    return bool(customer.opt_in) and not customer.opted_out and not customer.blocked
+
+
 def _sent_today_count(db: Session, kind: str) -> int:
     start = datetime.combine(today_ist_date(), datetime.min.time()) - timedelta(hours=5, minutes=30)
     rows = list(db.scalars(select(Campaign).where(Campaign.kind == kind, Campaign.created_at >= start)))
@@ -54,8 +62,8 @@ def send_birthday_wishes(db: Session, force: bool = False) -> dict:
     customers = memory.upcoming_birthdays(db, within_days=0)
     sent, skipped = [], []
     for customer in customers:
-        if customer.opted_out:
-            skipped.append(customer.phone)  # STOP ka matlab STOP — force se bhi nahi todo
+        if not can_receive_marketing(customer):
+            skipped.append(customer.phone)  # consent nahi / STOP — force se bhi nahi bhejte
             continue
         if not force and _already_today(db, customer.phone, "birthday_wish"):
             skipped.append(customer.phone)
@@ -92,11 +100,8 @@ def send_winback_offers(db: Session, limit: int | None = None, force: bool = Fal
     for customer in candidates:
         if len(sent) >= limit:
             break
-        if customer.opted_out:
-            skipped.append(customer.phone)  # STOP ka matlab STOP (Section 22)
-            continue
-        if not customer.opt_in:
-            skipped.append(customer.phone)  # bina permission spam nahi (Section 17)
+        if not can_receive_marketing(customer):
+            skipped.append(customer.phone)  # bina permission / STOP ke spam nahi (Section 17, 22)
             continue
         if not force and _already_today(db, customer.phone, "winback"):
             skipped.append(customer.phone)
@@ -123,14 +128,14 @@ def send_winback_offers(db: Session, limit: int | None = None, force: bool = Fal
 
 
 def send_broadcast(db: Session, message: str, only_opt_in: bool = True, limit: int | None = None) -> dict:
-    """Sabko ek saath offer (F15) — sirf permission wale customers ko."""
+    """Offer broadcast (F15) — HAMESHA sirf opt-in customers ko. `only_opt_in=False` ignore hota hai (consent non-negotiable)."""
     limit = limit or settings.max_proactive_per_day
-    audience = memory.all_customers(db, only_opt_in=only_opt_in)
+    audience = memory.all_customers(db, only_opt_in=True)
     sent, skipped = [], []
     for customer in audience:
         if len(sent) >= limit:
             break
-        if customer.opted_out:
+        if not can_receive_marketing(customer):
             skipped.append(customer.phone)
             continue
         if _already_today(db, customer.phone, "broadcast"):
@@ -178,7 +183,7 @@ def progress_orders(db: Session, force: bool = False) -> list[dict]:
             if idx <= stage_index:
                 continue
             if minutes >= after or force:
-                orchestrator.advance_order_status(db, order, status)
+                orchestrator.advance_order_status(db, order, status, actor="automation")
                 moved.append({"order_no": order.order_no, "status": status})
                 break
     return moved
@@ -220,7 +225,6 @@ def send_feedback_requests(db: Session) -> list[dict]:
 
 def send_reservation_reminders(db: Session) -> list[dict]:
     """Booking se 1 ghanta pehle yaad dilana (F9)."""
-    soon = now_ist() + timedelta(minutes=settings.reservation_reminder_minutes)
     rows = list(
         db.scalars(
             select(Reservation).where(
@@ -237,9 +241,12 @@ def send_reservation_reminders(db: Session) -> list[dict]:
             slot = datetime.combine(reservation.date, datetime.min.time()).replace(hour=int(hour), minute=int(minute))
         except (ValueError, AttributeError):
             continue
-        if slot - now_ist() > timedelta(minutes=settings.reservation_reminder_minutes):
+        until = slot - now_ist()
+        if until > timedelta(minutes=settings.reservation_reminder_minutes):
+            continue  # abhi bahut door hai — window me aane par bhejenge
+        if until < timedelta(minutes=-5):
+            reservation.reminder_sent = True  # slot nikal chuka — purani booking ka reminder nahi bhejte
             continue
-        customer = memory.get_customer(db, reservation.customer_phone)
         text = (
             f"Reminder sir! 🍽️ Aapki table {reservation.persons} log ke liye aaj "
             f"{reservation.time} par book hai — {settings.restaurant_name}.\n"

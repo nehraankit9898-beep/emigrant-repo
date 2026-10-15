@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime, timedelta, timezone
+from decimal import ROUND_HALF_UP, Decimal
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -32,19 +33,36 @@ def pretty_phone(phone: str) -> str:
 
 
 # ------------------------------------------------------------------ money
-def rupees(amount: float, with_symbol: bool = True) -> str:
-    """Rs. 648 (no decimals when round, warna 2 decimal)."""
-    amount = float(amount or 0)
-    if abs(amount - round(amount)) < 0.005:
-        text = f"{int(round(amount)):,}"
+def rupees(amount, with_symbol: bool = True) -> str:
+    """₹648 (round ho to decimals nahi, warna 2 decimal). Indian grouping ke bina (display ke liye)."""
+    value = q2(amount)
+    if value == value.to_integral_value():
+        text = f"{int(value):,}"
     else:
-        text = f"{amount:,.2f}"
+        text = f"{value:,.2f}"
     return f"₹{text}" if with_symbol else text
 
 
-def money(amount: float) -> float:
-    """2 decimal par round (float jhamela se bacho)."""
-    return round(float(amount or 0) + 1e-9, 2)
+PAISE = Decimal("0.01")
+
+
+def to_decimal(value) -> Decimal:
+    """Float/str/int -> Decimal. Float ko str ke through lete hain (binary drift se bachne ke liye)."""
+    if value is None or value == "":
+        return Decimal("0")
+    if isinstance(value, Decimal):
+        return value
+    return Decimal(str(value))
+
+
+def q2(value) -> Decimal:
+    """Paise tak round (ROUND_HALF_UP — dukaan wala rounding)."""
+    return to_decimal(value).quantize(PAISE, rounding=ROUND_HALF_UP)
+
+
+def money(amount) -> float:
+    """Paise tak round karke float (DB column ke liye). Arithmetic hamesha Decimal me karo."""
+    return float(q2(amount))
 
 
 # ------------------------------------------------------------------ time

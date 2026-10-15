@@ -245,3 +245,17 @@ Report ka Section 20 checklist bhi inhi tests me cover hota hai.
 Is repo ka code tumhara hai — jo bhi karo, bas restaurant wale ke data ka khayal rakhna 😄
 
 *Report + code dono ek saath: pehle report padho (kyun/kitna/kaise), phir ye repo chalao (kya ban gaya dekhne ke liye).*
+
+---
+
+## Production readiness docs
+
+- `docs/PROJECT_AUDIT.md` — scope, method, what was verified, test results
+- `docs/FEATURE_STATUS.md` — every feature with a status (WORKING_VERIFIED / PARTIAL / BROKEN / MOCK_ONLY / NOT_IMPLEMENTED / BLOCKED_EXTERNAL_SETUP) and its evidence
+- `docs/SECURITY_AUDIT.md` — findings, fixes, manual HTTP checks (not a penetration test)
+- `docs/IMPLEMENTATION_PLAN.md` — remaining work, product decisions, next task
+- `docs/DEPLOYMENT.md` — deployment and production checklist
+
+**Database schema:** `make migrate` (Alembic: `alembic upgrade head`). Production me `create_all` nahi chalta; schema migrations se hi banta hai.
+
+**Tests:** `python -m pytest -q` (61 tests; koi real WhatsApp/Razorpay credential nahi chahiye).

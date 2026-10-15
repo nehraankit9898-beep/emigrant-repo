@@ -19,6 +19,9 @@ run: ## Agent + dashboard chalao (http://localhost:8000)
 demo: ## Terminal me poora chat demo
 	$(PY) -m scripts.demo_chat --reset
 
+migrate: ## Database schema migrations (Alembic) — production me isi se schema banega
+	$(PY) -m alembic upgrade head
+
 seed: ## Demo data (1 mahine ka hisaab) load karo
 	$(PY) -m app.seed
 
@@ -38,4 +41,4 @@ reset: ## Demo data reset (DB saaf karke naya demo)
 	rm -rf data/*.db
 	$(PY) -m app.seed
 
-.PHONY: help install env run demo seed test docker logs down reset
+.PHONY: help install env run demo migrate seed test docker logs down reset
