@@ -138,7 +138,7 @@ def _find_time(text: str) -> str | None:
 
 
 def _find_date(text: str) -> str | None:
-    from datetime import timedelta
+    from datetime import date, timedelta
 
     from .utils import today_ist_date
 
@@ -150,19 +150,35 @@ def _find_date(text: str) -> str | None:
         return str(today + timedelta(days=1))
     if "aaj" in low or "today" in low or "tonight" in low:
         return str(today)
-    m = re.search(r"\b(\d{1,2})\s*(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b", low)
+
+    def calendar_date(day: int, month: int, year_text: str | None) -> str | None:
+        # Explicit years must win over the guessed next occurrence. Otherwise a
+        # request such as "15 Nov 2027" today could silently book 15 Nov 2026.
+        if year_text:
+            if len(year_text) == 2:
+                year = 2000 + int(year_text)
+            elif len(year_text) == 4:
+                year = int(year_text)
+            else:
+                return None
+        else:
+            year = today.year if month >= today.month else today.year + 1
+        try:
+            return date(year, month, day).isoformat()
+        except ValueError:
+            return None
+
+    month_pattern = r"\b(\d{1,2})\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*(?:\s*,?\s*(\d{2,4}))?\b"
+    m = re.search(month_pattern, low)
     if m:
-        day = int(m.group(1))
-        month_word = re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*", low).group(0)
-        month = MONTHS.get(month_word[:3], "01")
-        year = today.year if (int(month) >= today.month) else today.year + 1
-        return f"{year}-{month}-{day:02d}"
+        day, month = int(m.group(1)), int(MONTHS[m.group(2)])
+        return calendar_date(day, month, m.group(3))
+
     m = re.search(r"\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b", low)
     if m:
         day, month = int(m.group(1)), int(m.group(2))
         if 1 <= day <= 31 and 1 <= month <= 12:
-            year = today.year if month >= today.month else today.year + 1
-            return f"{year}-{month:02d}-{day:02d}"
+            return calendar_date(day, month, m.group(3))
     return None
 
 
