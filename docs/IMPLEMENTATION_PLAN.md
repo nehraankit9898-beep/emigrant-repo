@@ -1,6 +1,6 @@
 # IMPLEMENTATION PLAN — remaining work
 
-Date: 2026-10-15 · Branch: `arena/962345dc-emigrant-repo`
+Date: 2026-10-15 · Branch: `arena/dd5271e6-emigrant-repo` (base `main@e1aef9d`)
 
 Ordering: P0 = blocks safe production use · P1 = needed for the SaaS target · P2 = hardening / polish.
 Each item lists the verification that must exist before its status can change to WORKING_VERIFIED.
@@ -19,12 +19,33 @@ Each item lists the verification that must exist before its status can change to
 - Dashboard: token from header only; broadcast opt-in with confirm.
 - Ruff F401/F811 cleanup.
 
+## Done in this pass (bug-fix + verify)
+
+Found by running the product, not by reading it (see `docs/FEATURE_STATUS.md` → *Bug fixes verified
+in this pass*). Each was reproduced on the base commit before being fixed, so every regression test
+is proven to fail without the fix.
+
+- **B-1** pending order tracking: `pay` / `bill` now find the unpaid order (COD-only bug) — with a
+  DB-backed fallback that ignores cancelled orders.
+- **B-2 / B-3** bills rebuilt from `order.items` dropped the discount, so customers were shown a
+  *higher* total than they were charged (`₹798` instead of `₹718.20`), including after paying.
+  Fixed with `pricing.bill_from_order()` + new `orders.discount_percent` / `orders.gst_percent`
+  columns (migration `0003_order_bill_rates`, non-destructive, back-filling, reversible).
+- **B-4** `PUT /api/settings` wrote to a table nothing read. Now a validated override map
+  (`settings.apply_overrides`) applies on save and reloads from the DB at startup.
+- Dev databases gain new columns automatically instead of crashing (`add_missing_columns`);
+  production schema stays migration-only.
+- **P0-2 concurrency tests** (`tests/test_concurrency.py`, 8 tests): parallel order numbers,
+  parallel coupon redeem, parallel duplicate webhooks, parallel payment settle.
+- Test suite: 61 → 86 tests. `scripts/bug_hunt.py` and `scripts/smoke_api.py` added as repeatable
+  live verification.
+
 ## P0 — required before any real customer data
 
 | # | Item | Why | Verification required | Owner/Blocker |
 |---|---|---|---|---|
 | P0-1 | Run the suite and `alembic upgrade head` against **PostgreSQL 16** | Advisory lock, row updates, and migrations are only SQLite-tested | Test run on Postgres: migrations, reservation lock, coupon race, payment webhook race | Needs Postgres (not in sandbox) — BLOCKED_EXTERNAL_SETUP |
-| P0-2 | Concurrency tests (threads or two processes): parallel orders (order_no), parallel coupon redeem, parallel duplicate webhooks | Claims of race-safety are currently code-reviewed | Tests that fail on the old code and pass on the new | Can be written now; SQLite serialises writes, so run on Postgres for real evidence |
+| P0-2 | Concurrency tests (threads or two processes): parallel orders (order_no), parallel coupon redeem, parallel duplicate webhooks | Claims of race-safety were code-reviewed only | Tests that fail on the old code and pass on the new | **DONE (tests written, 8 tests).** Still needs a run on PostgreSQL for real evidence: `TEST_DATABASE_URL=postgresql+psycopg://… pytest tests/test_concurrency.py` |
 | P0-3 | Build the Docker image and run `docker compose up` with a real `.env` | Dockerfile/compose changed but not built | `docker build` succeeds; `/ready` 200 inside the container; container runs as uid 10001 | Needs Docker — BLOCKED_EXTERNAL_SETUP |
 | P0-4 | Rotate `ADMIN_TOKEN` values that were ever put in a URL; purge old access logs | S-08 | Owner action + check | Owner action |
 | P0-5 | Live WhatsApp round trip: verify, inbound signed message, outbound send, delivery status, and a provider rejection shown as "not sent" | Honest send status is unverified against Meta | Real Meta test number; logs show message id | Needs Meta credentials — BLOCKED_EXTERNAL_SETUP |
@@ -41,7 +62,7 @@ Each item lists the verification that must exist before its status can change to
 | P1-5 | **Discount rule semantics**: decide whether `nth_order` means "exactly the N-th order" or "from N onward" | Current behaviour: order number ≥ N fires every time | **Product decision** (see below); then test |
 | P1-6 | Reservation chat path: use overlap-aware capacity (currently exact-time match); move `MAX_SEATS_PER_SLOT` into per-restaurant config | Double-booking risk in chat path | Tests for overlapping slots; Postgres lock test (P0-1) |
 | P1-7 | Automations consent: run tests for winback, birthday, owner report, broadcast with opt-in / opted-out / blocked customers | Partially covered | Tests per rule; a non-consented customer receives nothing |
-| P1-8 | Persist `PUT /api/settings` (DB-backed per tenant) instead of process-global mutation | Settings are lost on restart | Test: value survives restart |
+| P1-8 | ~~Persist `PUT /api/settings` (DB-backed per tenant) instead of process-global mutation~~ | Settings were lost on restart | Test: value survives restart | **Partially done:** overrides now apply immediately and reload from the DB on startup (restart-safe, validated, per-deployment). Per-tenant part still needs P1-1. |
 | P1-9 | LLM hardening: delimit customer text, strip control sequences, length cap, output schema validation; AI never sets price/discount/items (already enforced server-side — keep and test) | S-22 | Tests with injection strings: no price change, no unknown item, no DB/shell action |
 | P1-10 | Rate limiting on `/webhook`, `/api/*` auth failures, and the Razorpay endpoint | S-23 | Test with burst requests gets 429 |
 | P1-11 | Dashboard browser test (Playwright or similar): token flow, order status buttons, broadcast confirm, 401 handling | Dashboard is PARTIAL | Browser test run recorded in repo |
@@ -66,7 +87,21 @@ Each item lists the verification that must exist before its status can change to
 
 ## Next task (recommended)
 
-P0-2 concurrency tests for order numbering, coupon redemption, and duplicate webhooks, written so they run against
-PostgreSQL when `TEST_DATABASE_URL` is set and are skipped otherwise. Then P1-1 (tenant model), since the SaaS
-target depends on it and it changes the schema (must be done as a non-destructive Alembic migration with a test on
-existing data).
+**P0-1 — run the existing suite against PostgreSQL 16.** It is now the single dependency blocking
+real evidence for the concurrency work:
+
+```bash
+createdb agent_test
+TEST_DATABASE_URL=postgresql+psycopg://user:pass@localhost:5432/agent_test \
+  python -m pytest -q          # 86 tests, including migrations + concurrency
+alembic upgrade head           # against a Postgres DATABASE_URL
+```
+
+This also unblocks P0-3 (Docker build) and P1-6 (Postgres advisory lock for reservations).
+
+Then **P1-1 (tenant model)**: the SaaS blocker, and it changes the schema — so it must be a
+non-destructive Alembic migration with a test on existing data, using the same pattern as
+`0003_order_bill_rates` (add columns → back-fill → drop server default).
+
+The four product decisions above should be answered before P1-1, so the migration encodes the
+decisions instead of guessing them.

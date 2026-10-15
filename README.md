@@ -156,8 +156,11 @@ app/
   seed.py          1 mahine ka demo data
   static/dashboard.html  Owner ka dashboard (single file, koi CDN nahi)
 scripts/demo_chat.py   Terminal me live demo
+scripts/smoke_api.py   Saare routes ki live jaanch (server chal raha ho to)
+scripts/bug_hunt.py    Billing/payment bugs ki live jaanch
+scripts/e2e_walkthrough.py  Poora chat safar
 n8n/whatsapp-agent-workflow.json   Low-code (Tarika 2) workflow
-tests/                25 tests — poora flow covered
+tests/                86 tests — flow, billing regressions, concurrency, migrations, security
 docs/                 Setup guide, deployment, owner demo script
 ```
 
@@ -201,12 +204,21 @@ Agar `.env` me `ADMIN_TOKEN` set kiya ho to har API call me `X-Admin-Token` head
 python -m pytest -q
 ```
 
-25 tests: order parsing (Hindi numbers bhi), bill maths + discount cap, coupon ek hi baar,
+86 tests: order parsing (Hindi numbers bhi), bill maths + discount cap, coupon ek hi baar,
 payment idempotency, thanks + loyalty points, complaint alert, handover, STOP/START,
 table booking + cancel, feedback (good/bad), birthday ek hi baar, winback sirf opt-in ko,
-intent engine, language detect, webhook parsing, prompt safety rules.
+intent engine, language detect, webhook parsing, prompt safety rules, Alembic migrations,
+concurrency (parallel orders/coupons/webhooks/payments), aur billing regressions.
 
 Report ka Section 20 checklist bhi inhi tests me cover hota hai.
+
+Server chal raha ho to poori API khud verify kar sakte ho:
+
+```bash
+python scripts/smoke_api.py        # saare GET routes — koi 500 nahi hona chahiye
+python scripts/bug_hunt.py         # billing/payment ke bugs dobara na aayein
+python scripts/e2e_walkthrough.py  # poora chat safar (naye number se)
+```
 
 ---
 
@@ -258,4 +270,9 @@ Is repo ka code tumhara hai — jo bhi karo, bas restaurant wale ke data ka khay
 
 **Database schema:** `make migrate` (Alembic: `alembic upgrade head`). Production me `create_all` nahi chalta; schema migrations se hi banta hai.
 
-**Tests:** `python -m pytest -q` (61 tests; koi real WhatsApp/Razorpay credential nahi chahiye).
+**Tests:** `python -m pytest -q` (86 tests; koi real WhatsApp/Razorpay credential nahi chahiye).
+
+**Is pass me kya theek hua:** live testing me 4 bug mile aur fix hue — pending order track na hona
+(`pay` ko bill nahi milta tha), bill dobara banate waqt discount hat jaana (customer ko asli se
+₹80 zyada dikhta tha), `resend-link` ka galat amount, aur Settings tab ka save hona par apply na
+hona. Poori detail: `docs/FEATURE_STATUS.md` → *Bug fixes verified in this pass*.

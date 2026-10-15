@@ -106,6 +106,10 @@ class Order(Base):
     items: Mapped[list] = mapped_column(JSON, default=list)  # [{name, qty, price, line_total, free}]
     subtotal: Mapped[float] = mapped_column(Float, default=0.0)
     discount_amount: Mapped[float] = mapped_column(Float, default=0.0)
+    # Bill par jo RATE lagaya gaya tha wahi save karte hain (config badalne ke baad bhi
+    # purana bill wahi amount/discount dikhayega — dobara hisaab lagane se galat total aata tha).
+    discount_percent: Mapped[float] = mapped_column(Float, default=0.0)
+    gst_percent: Mapped[float] = mapped_column(Float, default=0.0)
     discount_code: Mapped[Optional[str]] = mapped_column(String(30))
     discount_reason: Mapped[Optional[str]] = mapped_column(String(200))
     freebies: Mapped[Optional[list]] = mapped_column(JSON)  # ["Gulab Jamun (2 pc)"]

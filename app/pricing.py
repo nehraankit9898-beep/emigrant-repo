@@ -108,6 +108,7 @@ def build_bill(
     freebies: list[str] | None = None,
     packaging: float | None = None,
     delivery: float | None = None,
+    gst_percent: float | None = None,
     apply_gst: bool = True,
     cap_discount: bool = True,
 ) -> Bill:
@@ -156,7 +157,10 @@ def build_bill(
     discount = min(discount, subtotal)  # discount kabhi subtotal se zyada nahi (negative total impossible)
 
     taxable = q2(subtotal - discount + packaging_d + delivery_d)
-    gst_percent = to_decimal(settings.gst_percent or 0) if apply_gst else Decimal("0")
+    # gst_percent diya gaya ho to wahi lagao (purane order ka bill dobara banate waqt),
+    # warna aaj ki config. Isse total hamesha gst_amount ke saath consistent rahta hai.
+    gst_percent_d = to_decimal(settings.gst_percent if gst_percent is None else gst_percent)
+    gst_percent = gst_percent_d if apply_gst else Decimal("0")
     gst = q2(taxable * gst_percent / Decimal("100"))
     total = q2(taxable + gst)
 
@@ -207,6 +211,55 @@ def coupon_lines(coupon: Coupon, db: Session) -> tuple[float, str | None, list[s
         percent = settings.max_discount_percent
     free_item = coupon.free_item_name
     return percent, free_item, f"Coupon {coupon.code} ({coupon.source or 'offer'})"
+
+
+def bill_from_order(db: Session, order) -> Bill:
+    """Purane order ka **wahi** bill dobara banao (items + discount + GST + total).
+
+    Zaroori kyun hai: pehle ye jagah sirf `order.items` se `build_bill()` call karti thi,
+    jisme discount/gst ke rates nahi milte the — to GST bina discount ke lagta tha aur
+    customer ko asli total se zyada dikhta tha (payment ke baad bhi "Total: ₹798" jab
+    asli bill ₹718.20 ka tha).
+
+    Rates order par save hote hain (`discount_percent`, `gst_percent`), isliye config
+    badalne ke baad bhi purana bill wahi amount dikhata hai.
+    """
+    lines = [
+        {
+            "name": row.get("name"),
+            "qty": row.get("qty", 1),
+            "unit_price": row.get("price", 0),
+            "is_freebie": row.get("free", False),
+        }
+        for row in (order.items or [])
+        if isinstance(row, dict)
+    ]
+    # Rate order par save hai. Purane orders (columns aane se pehle ke) me 0 hoga —
+    # tab amount se rate nikal lete hain, warna discount hat kar total badh jaata.
+    percent = float(getattr(order, "discount_percent", 0) or 0)
+    if not percent and float(order.discount_amount or 0) > 0 and float(order.subtotal or 0) > 0:
+        percent = round(float(order.discount_amount) / float(order.subtotal) * 100, 4)
+
+    gst_percent = getattr(order, "gst_percent", None)
+    gst_percent = float(gst_percent) if gst_percent else None
+    if not gst_percent and float(order.gst_amount or 0) > 0 and float(order.taxable or 0) > 0:
+        gst_percent = round(float(order.gst_amount) / float(order.taxable) * 100, 4)
+
+    bill = build_bill(
+        db,
+        lines,
+        discount_percent=percent,
+        discount_code=order.discount_code,
+        discount_reason=order.discount_reason,
+        freebies=list(order.freebies or []),
+        packaging=float(order.packaging or 0),
+        delivery=float(order.delivery or 0),
+        # Jo rate us waqt lagaya gaya tha wahi reproduce karna hai:
+        # config aaj kuch bhi ho, purane order ka total nahi badalna chahiye.
+        gst_percent=gst_percent if gst_percent is not None else settings.gst_percent,
+        cap_discount=False,
+    )
+    return bill
 
 
 def bill_for_menu_item_names(db: Session, names: list[str]) -> Bill:

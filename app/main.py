@@ -15,6 +15,7 @@ from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from sqlalchemy import select
 
 from . import automations, menu as menu_engine, orchestrator, payments, seed, whatsapp
 from .api import router as api_router
@@ -27,6 +28,17 @@ from .utils import rupees, utcnow
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 SCHEDULER_INTERVAL = int(os.getenv("SCHEDULER_INTERVAL_SECONDS", "45"))
+
+
+def load_settings_overrides(db) -> dict:
+    """Dashboard se save settings DB se padho aur live settings par lagao (restart-safe)."""
+    from .models import AppSetting
+
+    overrides = {row.key: row.value for row in db.scalars(select(AppSetting))}
+    result = settings.apply_overrides(overrides)
+    for name, reason in result["rejected"].items():
+        print(f"[config warning] saved setting {name} ignore ki gayi: {reason}")
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -62,6 +74,10 @@ async def lifespan(app: FastAPI):
         from . import discounts
 
         discounts.seed_rules(db)
+        # Dashboard se save kiye gaye settings restart ke baad bhi rahein
+        # (pehle AppSetting table sirf likhi jaati thi, padhi nahi — isliye GST/persona
+        #  change restart par ud jaate the).
+        load_settings_overrides(db)
         if settings.demo_seed:
             seed.seed_demo(db)
     if settings.automation_enabled:

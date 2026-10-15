@@ -30,10 +30,14 @@ STATUS_FLOW: list[tuple[str, int]] = [
 ]
 
 
+def ist_day_start_utc() -> datetime:
+    """Aaj ki IST subah (00:00) UTC me — 'aaj bhej diya ya nahi' check ke liye."""
+    return datetime.combine(today_ist_date(), datetime.min.time()) - timedelta(hours=5, minutes=30)
+
+
 def _already_today(db: Session, phone: str, intent: str) -> bool:
-    start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     # IST ke hisaab se din ka start (UTC me)
-    start = datetime.combine(today_ist_date(), datetime.min.time()) - timedelta(hours=5, minutes=30)
+    start = ist_day_start_utc()
     row = db.scalar(
         select(Message.id)
         .where(Message.customer_phone == phone, Message.intent == intent, Message.direction == "out", Message.created_at >= start)
@@ -51,7 +55,7 @@ def can_receive_marketing(customer: Customer) -> bool:
 
 
 def _sent_today_count(db: Session, kind: str) -> int:
-    start = datetime.combine(today_ist_date(), datetime.min.time()) - timedelta(hours=5, minutes=30)
+    start = ist_day_start_utc()
     rows = list(db.scalars(select(Campaign).where(Campaign.kind == kind, Campaign.created_at >= start)))
     return sum(int(row.sent_count or 0) for row in rows)
 

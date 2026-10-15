@@ -1,6 +1,10 @@
 # PROJECT AUDIT — Sharma Cafe WhatsApp AI Agent
 
-Date: 2026-10-15 · Branch: `arena/962345dc-emigrant-repo` (base `main@0a8f201`)
+Date: 2026-10-15 · Branch: `arena/dd5271e6-emigrant-repo` (base `main@e1aef9d`)
+
+> **Second pass (this branch).** The previous audit reviewed the code; this pass **ran the product**
+> and found four defects that passed all 61 existing tests. They are listed in §7 with their
+> reproduction and fix. Test suite is now 86.
 
 ## 1. Scope and method
 
@@ -95,12 +99,51 @@ Also run:
 
 Not run: Docker build, Postgres migration/concurrency tests, browser tests, live provider tests.
 
+## 7. Second pass — defects found by running the product
+
+The first pass reviewed code; this pass exercised the running app (scripted walkthroughs of the
+real HTTP API plus targeted probes of every money path) and found four defects that **all 61
+existing tests passed straight through**. Each was reproduced on the base commit in a `git worktree`
+*before* being fixed, so the new tests are proven to fail without the fix.
+
+| # | Defect | Observed on base commit | Fix |
+|---|---|---|---|
+| B-1 | Pending order not tracked (COD-only `active_order`) | `pay` → `Sir abhi koi pending bill nahi hai 🙏` while the order was unpaid | Track every order + DB fallback (`latest_unpaid_order`), cancelled excluded |
+| B-2 | `bill` rebuilt without discount | `bill ₹798.0 vs asli ₹718.2` — also after payment | `pricing.bill_from_order()` + stored `discount_percent` / `gst_percent` |
+| B-3 | `resend-link` same defect | `message ₹798.0 vs order ₹718.2` | route uses `bill_from_order` |
+| B-4 | `PUT /api/settings` wrote to a read-never table | `GST apply nahi hua (abhi bhi 5.0)` | validated `settings.apply_overrides`, applied on save + reloaded at startup |
+
+Underlying cause of B-2/B-3: `Order` stored the discount **amount** but not the **rate**, so a
+rebuild could not reproduce the original bill. Migration `0003_order_bill_rates` adds
+`orders.discount_percent` and `orders.gst_percent` — non-destructive, back-fills legacy rows,
+reversible (round-trip verified), and it also means a historical bill keeps showing the rate that
+was actually applied even after the config changes.
+
+Migration `0003` was verified on: a fresh DB (18 tables), an existing DB with seeded legacy orders
+(rates back-filled correctly, data preserved), and downgrade → upgrade round trip. Separately,
+`app.database.add_missing_columns()` stops an existing **dev** database from crashing with
+*"no such column"* after a schema change; production schema remains migration-only. Checked against
+the 46 pre-existing demo orders — every one rebuilds to its exact stored total.
+
+Commands used for verification:
+
+```bash
+.venv/bin/python -m pytest -q                    # 86 passed
+.venv/bin/python scripts/smoke_api.py            # 53 routes, no 5xx
+.venv/bin/python scripts/bug_hunt.py             # 5 checks, 0 failing
+.venv/bin/ruff check app tests scripts migrations --select F,E9   # clean
+python -m compileall -q app scripts tests        # clean
+```
+
 ## 6. Remaining gaps (short list; detail in IMPLEMENTATION_PLAN.md)
 
 - No multi-tenant model: one deployment = one restaurant. Multi-restaurant SaaS is NOT_IMPLEMENTED.
 - No roles (owner / staff / read-only); a single shared admin token.
-- Per-restaurant GST not implemented; GST is a per-deployment setting (`GST_PERCENT`, default 5.0).
-- PostgreSQL path, concurrent order/coupon/webhook races: not run here.
+- Per-restaurant GST not implemented; GST is a per-deployment setting (now overridable at runtime
+  from the Settings tab, but still one value per deployment).
+- PostgreSQL path, concurrent order/coupon/webhook races: **tests now exist**
+  (`tests/test_concurrency.py`, 8 tests) but have only been executed on SQLite. Run them with
+  `TEST_DATABASE_URL` pointing at Postgres for real evidence.
 - Automations consent rules: partially covered by tests; not fully verified.
 - LLM prompt isolation: not implemented.
 - Live WhatsApp and Razorpay: blocked by external credentials (not available in this sandbox).
