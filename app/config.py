@@ -105,6 +105,11 @@ class Settings:
     public_base_url: str = field(default_factory=lambda: _s("PUBLIC_BASE_URL", "").rstrip("/"))
     port: int = field(default_factory=lambda: _i("PORT", 8000))
     demo_seed: bool = field(default_factory=lambda: _b("DEMO_SEED", True))
+    # development | demo | production. production me unsafe settings par app start nahi hota.
+    app_env: str = field(default_factory=lambda: _s("APP_ENV", "development").lower())
+    # Reservation capacity: ek time-window (minutes) me kitne seats total
+    reservation_max_seats: int = field(default_factory=lambda: _i("RESERVATION_MAX_SEATS", 24))
+    reservation_window_minutes: int = field(default_factory=lambda: _i("RESERVATION_WINDOW_MINUTES", 90))
 
     # ---- derived helpers ----
     @property
@@ -134,6 +139,31 @@ class Settings:
             "ollama": "http://localhost:11434/v1",
         }.get(self.llm_provider, "https://api.openai.com/v1")
 
+    @property
+    def is_production(self) -> bool:
+        return self.app_env == "production"
+
+    def production_problems(self) -> list[str]:
+        """APP_ENV=production me ye sab theek hona zaroori hai. Khaali list = theek."""
+        problems: list[str] = []
+        if self.app_env not in {"development", "demo", "production"}:
+            problems.append("APP_ENV sirf development | demo | production ho sakta hai")
+        if not self.is_production:
+            return problems
+        if len(self.admin_token) < 24:
+            problems.append("ADMIN_TOKEN kam se kam 24 characters ka random string hona chahiye")
+        if self.database_url.startswith("sqlite"):
+            problems.append("production me DATABASE_URL Postgres hona chahiye (sqlite par nahi)")
+        if self.whatsapp_mode != "live" or not self.whatsapp_app_secret:
+            problems.append("production me WHATSAPP_MODE=live aur WHATSAPP_APP_SECRET dono zaroori hain")
+        if self.payment_mode == "live" and not self.razorpay_webhook_secret:
+            problems.append("live payment ke liye RAZORPAY_WEBHOOK_SECRET zaroori hai")
+        if self.payment_mode != "live":
+            problems.append("production me PAYMENT_MODE=live hona chahiye (mock payment production me allowed nahi)")
+        if not self.public_base_url.startswith("https://"):
+            problems.append("production me PUBLIC_BASE_URL https:// se shuru hona chahiye")
+        return problems
+
     def mode_report(self) -> dict:
         """Dashboard banner ke liye — kya asli hai, kya demo hai."""
         return {
@@ -147,6 +177,7 @@ class Settings:
             "database": self.database_url.split("://", 1)[0],
             "gst_percent": self.gst_percent,
             "automation_enabled": self.automation_enabled,
+            "app_env": self.app_env,
         }
 
 

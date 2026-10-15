@@ -16,10 +16,13 @@ from pathlib import Path
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 
-from . import automations, memory, menu as menu_engine, orchestrator, payments, reports, seed, whatsapp
+from . import automations, menu as menu_engine, orchestrator, payments, seed, whatsapp
 from .api import router as api_router
-from .config import BASE_DIR, settings
+from .config import settings
+from .logging_setup import configure_logging
 from .database import SessionLocal, init_db, session_scope
+from .models import Order
+from .security import audit, claim_event
 from .utils import rupees, utcnow
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -47,6 +50,12 @@ async def _scheduler_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _scheduler_task
+    problems = settings.production_problems()
+    if settings.is_production and problems:
+        # production me galat config ke saath app chalu hi nahi hota
+        raise RuntimeError("Production config galat hai:\n  - " + "\n  - ".join(problems))
+    for problem in problems:
+        print(f"[config warning] {problem}")
     init_db()
     with session_scope() as db:
         menu_engine.ensure_menu(db)
@@ -74,6 +83,8 @@ async def lifespan(app: FastAPI):
                 pass
 
 
+configure_logging(json_output=settings.is_production, level=os.getenv("LOG_LEVEL", "INFO").upper())
+
 app = FastAPI(
     title=f"{settings.restaurant_name} — WhatsApp AI Agent",
     description="Restaurant/Cafe WhatsApp AI Agent (memory + funny + orders + payments + owner reports).",
@@ -100,7 +111,11 @@ async def webhook_verify(request: Request):
 
 @app.post("/webhook")
 async def webhook_receive(request: Request, background: BackgroundTasks, x_hub_signature_256: str | None = Header(default=None)):
-    """Meta se aane wale messages — yahin se poora agent chalta hai."""
+    """Meta se aane wale messages — yahin se poora agent chalta hai.
+
+    Signature raw body par verify hoti hai. Duplicate delivery (Meta retry) processing me
+    `processed_events` table se skip hoti hai (wamid dedupe) — yahan sirf 200 jaata hai.
+    """
     body = await request.body()
     if not whatsapp.verify_signature(body, x_hub_signature_256):
         raise HTTPException(status_code=403, detail="signature invalid")
@@ -108,7 +123,11 @@ async def webhook_receive(request: Request, background: BackgroundTasks, x_hub_s
         payload = json.loads(body or b"{}")
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="invalid json")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="invalid payload")
 
+    if whatsapp.is_status_only_payload(payload):
+        return {"status": "EVENT_RECEIVED", "count": 0}
     inbound_messages = whatsapp.parse_webhook(payload)
     if inbound_messages:
         background.add_task(_process_inbound_batch, inbound_messages)
@@ -116,8 +135,12 @@ async def webhook_receive(request: Request, background: BackgroundTasks, x_hub_s
 
 
 def _process_inbound_batch(inbound_messages: list[whatsapp.Inbound]) -> None:
+    """Background processing. Har message ka dedupe + processing ek hi transaction me hai:
+    processing fail ho to claim bhi rollback ho jata hai (Meta retry safe rahe)."""
     with session_scope() as db:
         for inbound in inbound_messages:
+            if not claim_event(db, "whatsapp", inbound.message_id or ""):
+                continue  # duplicate delivery — skip
             whatsapp.mark_read(inbound.message_id)
             try:
                 orchestrator.handle_inbound(db, inbound)
@@ -131,6 +154,7 @@ def _process_inbound_batch(inbound_messages: list[whatsapp.Inbound]) -> None:
 # --------------------------------------------------------------------------
 @app.post("/webhook/razorpay")
 async def razorpay_webhook(request: Request, x_razorpay_signature: str | None = Header(default=None)):
+    """Razorpay webhook. Signature fail-closed; amount order se reconcile; side-effects sirf ek baar."""
     body = await request.body()
     if not payments.verify_razorpay_signature(body, x_razorpay_signature):
         raise HTTPException(status_code=403, detail="razorpay signature invalid")
@@ -141,8 +165,24 @@ async def razorpay_webhook(request: Request, x_razorpay_signature: str | None = 
     with session_scope() as db:
         payment = payments.find_payment(db, provider_ref=event.get("provider_ref"), order_no=event.get("order_no"))
         if not payment:
-            return {"status": "payment not found", "event": event}
-        order = payments.mark_paid(db, payment, ref=event.get("provider_ref"), via="razorpay_webhook")
+            return {"status": "payment_not_found"}
+        if payment.provider != "razorpay" and settings.payment_live:
+            # live mode me mock/demo payment par provider webhook accept nahi
+            raise HTTPException(status_code=409, detail="payment provider mismatch")
+        if not claim_event(db, "razorpay", f"{event.get('event')}:{event.get('provider_ref')}"):
+            return {"status": "duplicate_ignored"}
+        settled = payments.settle_payment(
+            db,
+            payment,
+            ref=event.get("provider_ref"),
+            via="razorpay_webhook",
+            amount_paise=event.get("amount_paise"),
+            currency=event.get("currency"),
+        )
+        if not settled:
+            db.refresh(payment)
+            return {"status": "not_settled", "payment_status": payment.status}
+        order = db.get(Order, payment.order_id)
         if order:
             orchestrator.on_payment_success(db, order, via="razorpay")
     return {"status": "ok", "order": event.get("order_no")}
@@ -152,7 +192,7 @@ async def razorpay_webhook(request: Request, x_razorpay_signature: str | None = 
 async def mock_pay_page(token: str):
     with session_scope() as db:
         payment, order = payments.payment_by_token(db, token)
-        if not payment:
+        if not payment or payment.provider != "mock" or settings.payment_live:
             return HTMLResponse("<h2>Ye payment link expire ho gaya hai 🙏</h2>", status_code=404)
         if payment.status == "paid":
             return RedirectResponse(f"/pay/{token}/done")
@@ -161,12 +201,16 @@ async def mock_pay_page(token: str):
 
 @app.post("/pay/{token}/confirm")
 async def mock_pay_confirm(token: str):
+    """DEMO ONLY: mock payment page ka button. Live mode / non-mock payment par ye kaam nahi karta."""
     with session_scope() as db:
         payment, order = payments.payment_by_token(db, token)
         if not payment:
             raise HTTPException(status_code=404, detail="payment not found")
-        order = payments.mark_paid(db, payment, ref=payment.provider_ref, via="mock_page")
-        if order:
+        if payment.provider != "mock" or settings.payment_live:
+            raise HTTPException(status_code=409, detail="mock payment confirm live mode me allowed nahi")
+        settled = payments.settle_payment(db, payment, ref=payment.provider_ref, via="mock_page")
+        if settled:
+            audit(db, actor="demo:mock_page", action="demo.mock_payment_confirmed", target=f"order:{order.order_no}")
             orchestrator.on_payment_success(db, order, via="mock_page")
     return RedirectResponse(f"/pay/{token}/done", status_code=303)
 
@@ -205,6 +249,19 @@ async def health():
         "modes": settings.mode_report(),
         "time": utcnow().isoformat(),
     }
+
+
+@app.get("/ready")
+async def ready():
+    """Readiness: DB reachable ho to 200 (load balancer / docker healthcheck ke liye)."""
+    from sqlalchemy import text
+
+    try:
+        with SessionLocal() as db:
+            db.execute(text("SELECT 1"))
+    except Exception:  # pragma: no cover - depends on infra
+        return JSONResponse({"status": "not_ready", "database": "unreachable"}, status_code=503)
+    return {"status": "ready", "config_ok": not settings.production_problems()}
 
 
 @app.get("/privacy", response_class=HTMLResponse)

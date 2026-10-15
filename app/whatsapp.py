@@ -16,11 +16,11 @@ import json
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any
 
 import httpx
 
 from .config import settings
+from .security import constant_time_equals
 from .utils import clean_phone, utcnow
 
 GRAPH_BASE = "https://graph.facebook.com"
@@ -112,10 +112,20 @@ def parse_webhook(payload: dict) -> list[Inbound]:
     return inbound
 
 
+def is_status_only_payload(payload: dict) -> bool:
+    """Delivery/read status webhooks (messages list khaali) — inhe reply nahi chahiye."""
+    for entry in payload.get("entry", []) or []:
+        for change in entry.get("changes", []) or []:
+            if (change.get("value") or {}).get("messages"):
+                return False
+    return True
+
+
 def verify_signature(body: bytes, signature_header: str | None) -> bool:
     """Meta ke X-Hub-Signature-256 se check karo ki request asli Meta ki hai."""
     if not settings.whatsapp_app_secret:
-        return True  # secret set nahi hai to (demo me) allow
+        # fail-closed: live ya production me app secret ke bina koi webhook accept nahi
+        return not settings.whatsapp_live and not settings.is_production
     if not signature_header or not signature_header.startswith("sha256="):
         return False
     expected = hmac.new(settings.whatsapp_app_secret.encode(), body, hashlib.sha256).hexdigest()
@@ -124,7 +134,9 @@ def verify_signature(body: bytes, signature_header: str | None) -> bool:
 
 def verify_webhook_challenge(mode: str, token: str, challenge: str) -> str | None:
     """Meta GET verification (hub.mode, hub.verify_token, hub.challenge)."""
-    if mode == "subscribe" and token == settings.whatsapp_verify_token:
+    if not settings.whatsapp_verify_token:
+        return None  # khaali verify token se kisi ko bhi subscribe hone ka mauka nahi
+    if mode == "subscribe" and constant_time_equals(token, settings.whatsapp_verify_token):
         return challenge
     return None
 

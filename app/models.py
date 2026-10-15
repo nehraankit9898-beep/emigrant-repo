@@ -31,6 +31,7 @@ from sqlalchemy import (
     JSON,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -269,3 +270,28 @@ class AppSetting(Base):
     key: Mapped[str] = mapped_column(String(60), primary_key=True)
     value: Mapped[Optional[dict]] = mapped_column(JSON)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class AuditLog(Base):
+    """Sensitive admin/system actions ka record (kaun, kab, kya badla). Kabhi edit/delete nahi hota."""
+
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    actor: Mapped[str] = mapped_column(String(80), index=True)  # dashboard | webhook:razorpay | automation | system
+    action: Mapped[str] = mapped_column(String(60), index=True)
+    target: Mapped[Optional[str]] = mapped_column(String(120))
+    details: Mapped[Optional[dict]] = mapped_column(JSON)  # secrets kabhi nahi
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class ProcessedEvent(Base):
+    """Webhook idempotency: provider ka event id ek hi baar process hota hai (Meta/Razorpay retries safe)."""
+
+    __tablename__ = "processed_events"
+    __table_args__ = (UniqueConstraint("provider", "event_key", name="uq_processed_event"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    provider: Mapped[str] = mapped_column(String(20))  # whatsapp | razorpay
+    event_key: Mapped[str] = mapped_column(String(160))  # wamid.xxx | payment id + event
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

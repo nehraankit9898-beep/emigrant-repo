@@ -9,11 +9,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import re
+from decimal import Decimal
+
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .models import Coupon, MenuItem
-from .utils import money, rupees
+from .utils import q2, rupees, to_decimal, utcnow
 
 
 @dataclass
@@ -107,43 +111,67 @@ def build_bill(
     apply_gst: bool = True,
     cap_discount: bool = True,
 ) -> Bill:
-    """Lines -> pura bill. Discount cap se zyada kabhi nahi (safety)."""
+    """Lines -> pura bill. Saara arithmetic Decimal me (paise tak round, HALF_UP). Discount cap se zyada kabhi nahi.
+
+    Freebie lines subtotal me nahi jodte. GST sirf `taxable` (subtotal - discount + packaging + delivery) par.
+    """
     bill = Bill()
     for raw in lines:
         if isinstance(raw, BillLine):
             bill.lines.append(raw)
             continue
-        qty = int(raw.get("qty", 1) or 1)
-        unit = money(raw.get("unit_price", raw.get("price", 0)))
-        line_total = money(unit * qty)
+        raw_qty = raw.get("qty", 1)
+        try:
+            qty_number = float(1 if raw_qty in (None, "") else raw_qty)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("quantity number hona chahiye") from exc
+        if qty_number != int(qty_number):
+            raise ValueError("quantity poori ginti honi chahiye")
+        qty = int(qty_number)
+        if qty < 1 or qty > 100:
+            raise ValueError("quantity 1 se 100 ke beech honi chahiye")
+        unit = q2(raw.get("unit_price", raw.get("price", 0)))
+        if unit < 0:
+            raise ValueError("price negative nahi ho sakta")
+        line_total = q2(unit * qty)
         bill.lines.append(
             BillLine(
                 name=str(raw.get("name", "Item")),
                 qty=qty,
-                unit_price=unit,
-                line_total=line_total,
+                unit_price=float(unit),
+                line_total=float(line_total),
                 is_freebie=bool(raw.get("is_freebie", False)),
             )
         )
 
-    bill.subtotal = money(sum(line.line_total for line in bill.lines if not line.is_freebie))
-    bill.packaging = money(settings.packaging_charge if packaging is None else packaging)
-    bill.delivery = money(settings.delivery_charge if delivery is None else delivery)
+    subtotal = sum((q2(line.line_total) for line in bill.lines if not line.is_freebie), Decimal("0"))
+    packaging_d = q2(settings.packaging_charge if packaging is None else packaging)
+    delivery_d = q2(settings.delivery_charge if delivery is None else delivery)
 
-    percent = float(discount_percent or 0)
+    percent = to_decimal(discount_percent or 0)
     if cap_discount:
-        percent = min(percent, settings.max_discount_percent)
-    percent = max(0.0, percent)
-    bill.discount_percent = percent
-    bill.discount_amount = money(bill.subtotal * percent / 100)
+        percent = min(percent, to_decimal(settings.max_discount_percent))
+    percent = max(Decimal("0"), percent)
+    discount = q2(subtotal * percent / Decimal("100"))
+    discount = min(discount, subtotal)  # discount kabhi subtotal se zyada nahi (negative total impossible)
+
+    taxable = q2(subtotal - discount + packaging_d + delivery_d)
+    gst_percent = to_decimal(settings.gst_percent or 0) if apply_gst else Decimal("0")
+    gst = q2(taxable * gst_percent / Decimal("100"))
+    total = q2(taxable + gst)
+
+    bill.subtotal = float(subtotal)
+    bill.packaging = float(packaging_d)
+    bill.delivery = float(delivery_d)
+    bill.discount_percent = float(percent)
+    bill.discount_amount = float(discount)
     bill.discount_code = discount_code
     bill.discount_reason = discount_reason
     bill.freebies = list(freebies or [])
-
-    bill.taxable = money(bill.subtotal - bill.discount_amount + bill.packaging + bill.delivery)
-    bill.gst_percent = float(settings.gst_percent or 0) if apply_gst else 0.0
-    bill.gst_amount = money(bill.taxable * bill.gst_percent / 100)
-    bill.total = money(bill.taxable + bill.gst_amount)
+    bill.taxable = float(taxable)
+    bill.gst_percent = float(gst_percent)
+    bill.gst_amount = float(gst)
+    bill.total = float(total)
     return bill
 
 
@@ -191,3 +219,51 @@ def bill_for_menu_item_names(db: Session, names: list[str]) -> Bill:
         if item:
             lines.append({"name": item.name, "qty": 1, "unit_price": item.price})
     return build_bill(db, lines)
+
+
+# --------------------------------------------------------------------------
+# Coupon redemption (single-use, race-safe)
+# --------------------------------------------------------------------------
+_CODE_TOKEN = re.compile(r"\b[A-Za-z][A-Za-z0-9]{3,29}\b")
+
+
+def find_coupon_in_text(db: Session, text: str, customer_phone: str, subtotal: float) -> tuple[Coupon | None, str]:
+    """Customer ke message me coupon code dhundo aur validate karo. (coupon, error_message)."""
+    tokens = {token.upper() for token in _CODE_TOKEN.findall(text or "")}
+    if not tokens:
+        return None, ""
+    candidates = db.scalars(select(Coupon).where(Coupon.code.in_(tokens)))
+    last_error = ""
+    for candidate in candidates:
+        coupon, error = validate_coupon(db, candidate.code, customer_phone, subtotal)
+        if coupon:
+            return coupon, ""
+        last_error = error
+    return None, last_error
+
+
+def redeem_coupon(db: Session, coupon: Coupon) -> bool:
+    """Coupon ko 'used' mark karo — sirf tab jab abhi tak unused ho (atomic). True = is call ne claim kiya."""
+    result = db.execute(
+        update(Coupon)
+        .where(Coupon.id == coupon.id, Coupon.is_used.is_(False))
+        .values(is_used=True, used_at=utcnow())
+    )
+    if result.rowcount == 1:
+        db.refresh(coupon)
+        return True
+    return False
+
+
+def attach_coupon_to_order(db: Session, coupon: Coupon, order_id: int) -> None:
+    db.execute(update(Coupon).where(Coupon.id == coupon.id).values(used_on_order_id=order_id))
+
+
+def release_coupons_for_order(db: Session, order_id: int) -> int:
+    """Order cancel hone par coupon wapas usable (ek hi baar — cancelled order ka coupon reuse ho sakta hai)."""
+    result = db.execute(
+        update(Coupon)
+        .where(Coupon.used_on_order_id == order_id)
+        .values(is_used=False, used_at=None, used_on_order_id=None)
+    )
+    return int(result.rowcount or 0)

@@ -58,6 +58,14 @@ def get_db() -> Iterator[Session]:
 
 
 def init_db() -> None:
-    from . import models  # noqa: F401  (models register karne ke liye)
+    """Development/demo: tables create karta hai (create_all — existing tables ko nahi chhedta).
 
+    Production: schema sirf Alembic migrations se banta/badalta hai (`alembic upgrade head`).
+    Yahan create_all production me nahi chalta, taaki schema drift na ho.
+    """
+    from . import models  # noqa: F401  (models register karne ke liye)
+    from .config import settings
+
+    if settings.is_production:
+        return
     Base.metadata.create_all(engine)

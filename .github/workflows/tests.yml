@@ -25,6 +25,9 @@ jobs:
           LLM_MODE: demo
           PAYMENT_MODE: mock
           AUTOMATION_ENABLED: "false"
+          APP_ENV: development
         run: python -m pytest -q
+      - name: Compile check
+        run: python -m compileall -q app scripts tests
       - name: Demo chat smoke test
         run: python -m scripts.demo_chat --phone 919000000123 --name "CI Tester" | tail -25

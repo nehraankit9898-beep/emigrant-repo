@@ -7,7 +7,7 @@ from datetime import timedelta
 from sqlalchemy import select
 
 from app import discounts, memory, menu as menu_engine, orchestrator, payments, whatsapp
-from app.models import Alert, Campaign, Coupon, Customer, Feedback, Order, Payment, Reservation
+from app.models import Alert, Coupon, Customer, Feedback, Order, Payment, Reservation
 from app.pricing import build_bill, validate_coupon
 from app.utils import clean_phone, now_ist, today_ist_date, utcnow
 
@@ -24,6 +24,12 @@ def say(db, phone, text, name=None):
 
 def last_reply_text(result) -> str:
     return "\n".join(reply.text for reply in result.replies)
+
+
+def walk_to_delivered(db, order):
+    """Kitchen ka valid raasta: confirmed -> preparing -> packed -> out_for_delivery -> delivered."""
+    for status in ("preparing", "packed", "out_for_delivery", "delivered"):
+        orchestrator.advance_order_status(db, order, status)
 
 
 # --------------------------------------------------------------------------
@@ -261,7 +267,7 @@ def test_good_feedback_google_review_and_coupon(db):
     db.commit()
 
     # delivery + feedback ka intezaar
-    orchestrator.advance_order_status(db, order, "delivered")
+    walk_to_delivered(db, order)
     db.commit()
 
     result = say(db, KNOWN_PHONE, "5")
@@ -277,7 +283,7 @@ def test_bad_feedback_alerts_owner(db):
     payload = db.scalar(select(Payment).where(Payment.order_id == order.id))
     payments.mark_paid(db, payload, via="test")
     orchestrator.on_payment_success(db, order, via="test")
-    orchestrator.advance_order_status(db, order, "delivered")
+    walk_to_delivered(db, order)
     db.commit()
 
     say(db, KNOWN_PHONE, "2")

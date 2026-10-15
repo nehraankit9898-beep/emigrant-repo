@@ -7,7 +7,7 @@ Ye file pehle se tay ki gayi table par chalti hai. AI bas bolta hai
 
 from __future__ import annotations
 
-import random
+import secrets
 import string
 from datetime import timedelta
 
@@ -158,7 +158,8 @@ def _is_birthday_today(customer: Customer) -> bool:
 # Coupon banane / use karne ka kaam
 # --------------------------------------------------------------------------
 def _rand_code(prefix: str, size: int = 4) -> str:
-    tail = "".join(random.choices(string.ascii_uppercase + string.digits, k=size))
+    # secrets: predictable random nahi (coupon guessing se bachav)
+    tail = "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(size))
     return f"{prefix}{tail}"
 
 
@@ -222,7 +223,7 @@ def thanks_coupon(db: Session, customer: Customer) -> Coupon:
     """Payment ke baad 'agle order me kaam aane wala' code (THANKS5 type)."""
     rule = db.scalar(select(DiscountRule).where(DiscountRule.trigger == "thanks"))
     percent = float(((rule.reward if rule else {}) or {}).get("value", 5) or 5)
-    code = _rand_code("THANKS", 3)
+    code = _rand_code("THANKS", 6)
     return issue_coupon(db, percent=percent, source="thanks", customer_phone=customer.phone, code=code, valid_days=30)
 
 

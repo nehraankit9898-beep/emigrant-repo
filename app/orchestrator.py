@@ -7,23 +7,23 @@ Safar (report Section 6 wala diagram):
 
 from __future__ import annotations
 
-import random
 import re
+import uuid
 from dataclasses import dataclass, field
 from datetime import date as date_cls
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import discounts, intent as intent_engine, llm, memory, menu as menu_engine, payments, whatsapp
+from . import discounts, intent as intent_engine, llm, memory, menu as menu_engine, payments, reservations, whatsapp
+from .security import audit
 from .config import settings
 from .models import Alert, Customer, Feedback, MenuItem, Message, Order, OrderItem, Payment, Reservation
-from .pricing import Bill, build_bill, validate_coupon
+from . import pricing
+from .pricing import Bill, build_bill
 from .utils import (
     clean_phone,
-    days_between,
     detect_language,
-    money,
     now_ist,
     rupees,
     today_ist_date,
@@ -31,7 +31,36 @@ from .utils import (
     utcnow,
 )
 
-MAX_SEATS_PER_SLOT = 24
+MAX_SEATS_PER_SLOT = 24  # legacy alias; asli limit settings.reservation_max_seats (RESERVATION_MAX_SEATS)
+
+# Kitchen / order lifecycle — sirf ye transitions allowed hain. Payment settle hone par
+# awaiting_payment -> confirmed automatically hota hai (payments.settle_payment).
+ORDER_TRANSITIONS: dict[str, set[str]] = {
+    "placed": {"confirmed", "cancelled"},
+    "awaiting_payment": {"confirmed", "cancelled"},
+    "confirmed": {"preparing", "cancelled"},
+    "preparing": {"packed", "cancelled"},
+    "packed": {"out_for_delivery", "served", "delivered"},
+    "out_for_delivery": {"delivered"},
+    "served": {"completed"},
+    "delivered": {"completed"},
+    "completed": set(),
+    "cancelled": set(),
+}
+ORDER_STATUSES = set(ORDER_TRANSITIONS)
+
+
+class OrderTransitionError(ValueError):
+    """Order status change allowed nahi."""
+
+
+def validate_order_transition(current: str, new: str) -> None:
+    if new not in ORDER_STATUSES:
+        raise OrderTransitionError(f"unknown status: {new}")
+    if new == current:
+        return
+    if new not in ORDER_TRANSITIONS.get(current, set()):
+        raise OrderTransitionError(f"{current} se {new} allowed nahi hai")
 
 
 # --------------------------------------------------------------------------
@@ -145,9 +174,12 @@ def _last_item_name(customer: Customer) -> str:
 # --------------------------------------------------------------------------
 # Order banana
 # --------------------------------------------------------------------------
-def _next_order_no(db: Session) -> str:
-    count = db.scalar(select(Order.id).order_by(Order.id.desc()).limit(1)) or 0
-    return f"{1000 + count + 1}"
+def _order_no_from_id(order_id: int) -> str:
+    """Order number DB ki primary key se banta hai (sequence-backed, reuse nahi hota, race-safe).
+
+    Pehle count-based tha: do parallel orders ek hi number le sakte the (unique constraint fail).
+    """
+    return str(1000 + order_id)
 
 
 def create_order(
@@ -191,7 +223,7 @@ def create_order(
         freebies=freebies,
     )
     order = Order(
-        order_no=_next_order_no(db),
+        order_no=f"pending-{uuid.uuid4().hex}",  # temporary unique value; flush ke baad asli number
         customer_id=customer.id,
         customer_phone=customer.phone,
         customer_name=customer.name,
@@ -223,6 +255,8 @@ def create_order(
     )
     db.add(order)
     db.flush()
+    order.order_no = _order_no_from_id(order.id)
+    db.flush()
     for line in bill.lines:
         item = menu_engine.find_item(db, line.name)
         db.add(
@@ -241,7 +275,15 @@ def create_order(
 
 
 def payment_message_for(db: Session, order: Order, bill: Bill, base_url: str | None = None) -> str:
-    payment = payments.create_payment(db, order, base_url=base_url)
+    try:
+        payment = payments.create_payment(db, order, base_url=base_url)
+    except payments.PaymentProviderError as exc:
+        # live provider down: fake link nahi, staff ko alert, customer ko honest message
+        create_alert(db, "system", f"Payment link nahi bana — Order #{order.order_no}: {exc}", order_id=order.id)
+        return (
+            f"{bill.text()}\n\nAbhi payment link nahi ban paya 🙏 Staff aapko thodi der me sahi link bhejega "
+            f"(ya counter par pay kar sakte hain)."
+        )
     link = payment.link or ""
     box = ""
     if not settings.payment_live:
@@ -294,10 +336,23 @@ def _handle_order(db: Session, customer: Customer, text: str, last_intent: str |
     next_order_number = (customer.total_orders or 0) + int(pending_count) + 1
     decision = discounts.evaluate_for_order(db, customer, subtotal, order_number=next_order_number)
 
-    # coupon use karna hai? ("WELCOME10 laga do")
+    # ---- coupon (customer ne code likha ho to) — validate + atomic claim ----
     percent = float(decision["percent"])
     code = decision["code"]
     reason = decision["reason"]
+    freebies_for_order = list(decision["freebies"])
+    coupon_note = ""
+    claimed_coupon = None
+    coupon, coupon_error = pricing.find_coupon_in_text(db, text, customer.phone, subtotal)
+    if coupon and pricing.redeem_coupon(db, coupon):
+        claimed_coupon = coupon
+        coupon_percent = min(float(coupon.discount_percent or 0), settings.max_discount_percent)
+        if coupon_percent > percent:  # sirf best single percent (stacking nahi)
+            percent, code, reason = coupon_percent, coupon.code, f"Coupon {coupon.code} ({coupon.source or 'offer'})"
+        if coupon.free_item_name and coupon.free_item_name not in freebies_for_order:
+            freebies_for_order.append(coupon.free_item_name)
+    elif coupon_error:
+        coupon_note = f"{coupon_error}\n\n"
 
     lines = [
         {"name": line.name, "qty": line.qty, "unit_price": line.unit_price}
@@ -313,10 +368,12 @@ def _handle_order(db: Session, customer: Customer, text: str, last_intent: str |
         discount_percent=percent,
         discount_code=code,
         discount_reason=reason,
-        freebies=decision["freebies"],
+        freebies=freebies_for_order,
         is_cod=is_cod,
         notes="repeat order" if repeat else None,
     )
+    if claimed_coupon is not None:
+        pricing.attach_coupon_to_order(db, claimed_coupon, order.id)
     if code:
         discounts.record_rule_use(db, code)
 
@@ -348,6 +405,8 @@ def _handle_order(db: Session, customer: Customer, text: str, last_intent: str |
         }
     )
     opener = llm.demo_brain(text, {"customer": context, "facts": facts}, intent="order")
+    if coupon_note:
+        opener = f"{coupon_note}{opener}"
 
     if is_cod:
         body = (
@@ -421,18 +480,26 @@ def _handle_reservation(db: Session, customer: Customer, text: str, entities: di
         lead = "Perfect sir 👍 " if got else ""
         return [Reply(text=f"{lead}Table ki booking ho jayegi — bas bata dijiye {ask}?", intent="reservation_slot")]
 
-    date_str, time_str, persons = str(pending["date"]), str(pending["time"]), int(pending["persons"])
+    date_str, time_str = str(pending["date"]), str(pending["time"])
     try:
-        booking_day = date_cls.fromisoformat(date_str)
-    except ValueError:
+        booking_day = reservations.parse_date(date_str, today_ist_date())
+        time_str = reservations.normalize_time(time_str)
+        persons = reservations.parse_persons(pending["persons"])
+    except reservations.ReservationError as exc:
         state.pop("reservation", None)
         customer.flow_state = state
-        return [Reply(text="Sir date thodi samajh nahi aayi 🤔 Aise likh dijiye — *kal 7 baje 4 log* ya *25 Oct 8 baje 2 log*.", intent="reservation_date_bad")]
-    booked = db.scalars(
-        select(Reservation).where(Reservation.date == booking_day, Reservation.time == time_str, Reservation.status == "confirmed")
-    )
-    seats_taken = sum(int(row.persons or 0) for row in booked)
-    if seats_taken + persons > MAX_SEATS_PER_SLOT:
+        return [Reply(text=f"Sir booking me dikkat hai: {exc} 🤔 Dobara bata dijiye?", intent="reservation_date_bad")]
+    try:
+        reservation = reservations.create_reservation(
+            db,
+            phone=customer.phone,
+            name=pending.get("name") or customer.name,
+            day=booking_day,
+            time_str=time_str,
+            persons=persons,
+            notes=pending.get("notes"),
+        )
+    except reservations.CapacityError:
         return [
             Reply(
                 text=f"Sir us time par table bhara hua hai 😅 {time_str} se aadhe ghante aage-peeche ho jaye to? "
@@ -442,17 +509,6 @@ def _handle_reservation(db: Session, customer: Customer, text: str, entities: di
                 buttons=[{"id": "res_alt_time", "title": "Doosra time"}, {"id": "res_manager", "title": "Manager se baat"}],
             )
         ]
-
-    reservation = Reservation(
-        customer_phone=customer.phone,
-        customer_name=pending.get("name") or customer.name,
-        date=booking_day,
-        time=time_str,
-        persons=persons,
-        status="confirmed",
-        notes=pending.get("notes"),
-    )
-    db.add(reservation)
     state.pop("reservation", None)
     customer.flow_state = state
     create_alert(
@@ -477,7 +533,6 @@ def _handle_reservation(db: Session, customer: Customer, text: str, entities: di
 
 
 def _pretty_date(date_str: str) -> str:
-    from datetime import date as date_cls
 
     try:
         day = date_cls.fromisoformat(date_str)
@@ -1031,10 +1086,6 @@ def on_payment_success(db: Session, order: Order, via: str = "webhook", deliver_
         customer, _ = memory.get_or_create_customer(db, order.customer_phone, order.customer_name)
     memory.apply_order_to_memory(db, customer, order)
 
-    for line in order.items or []:
-        item = menu_engine.find_item(db, line.get("name", ""))
-        if item and not line.get("free"):
-            pass
 
     coupon = discounts.thanks_coupon(db, customer)
     milestone = memory.next_loyalty_milestone(customer)
@@ -1083,8 +1134,10 @@ def on_payment_success(db: Session, order: Order, via: str = "webhook", deliver_
         customer_phone=customer.phone,
         order_id=order.id,
     )
-    # next order status: kitchen
-    order.order_status = "confirmed"
+    # kitchen status ko sirf tab aage badhao jab order abhi payment ka intezaar kar raha tha.
+    # Duplicate/late call kitchen ka 'preparing'/'ready' status wapas 'confirmed' nahi karega.
+    if order.order_status in {"placed", "awaiting_payment"}:
+        order.order_status = "confirmed"
     state = dict(customer.flow_state or {})
     state.pop("active_order", None)
     customer.flow_state = state
@@ -1096,18 +1149,27 @@ def on_payment_success(db: Session, order: Order, via: str = "webhook", deliver_
     return replies
 
 
-def advance_order_status(db: Session, order: Order, status: str, deliver_reply: bool = True) -> Reply:
-    """Order status badlo + customer ko update bhejo (F10)."""
+def advance_order_status(db: Session, order: Order, status: str, deliver_reply: bool = True, actor: str = "system") -> Reply:
+    """Order status badlo (validated transition) + audit + customer ko update."""
+    previous = order.order_status
+    validate_order_transition(previous, status)
+    if status == previous:
+        return Reply(text="", kind="none", intent=f"status_{status}")
     order.order_status = status
-    if status == "delivered":
-        order.delivered_at = utcnow()
+    if status == "cancelled":
+        pricing.release_coupons_for_order(db, order.id)  # coupon wapas usable
+    if status in {"delivered", "completed"}:
+        order.delivered_at = order.delivered_at or utcnow()
+    audit(db, actor=actor, action="order.status_changed", target=f"order:{order.order_no}", details={"from": previous, "to": status})
     customer = memory.get_customer(db, order.customer_phone)
     stages = {
         "confirmed": "Order confirm ho gaya sir ✅ Kitchen ne note kar liya.",
         "preparing": "Khana ban raha hai sir 👨‍🍳 Masala ekdum khushbu faila raha hai!",
         "packed": "Pack ho gaya sir 📦",
         "out_for_delivery": "Rider nikal gaya hai sir 🛵 Bas 10-15 minute!",
+        "served": "Aapka order table par serve ho gaya hai sir 🍽️ Enjoy kijiye!",
         "delivered": "Order pahunch gaya sir 😄 Khana kaisa laga? 1 se 5 star dijiye — aapki raay se hum sudharte hain!",
+        "completed": "Order complete ho gaya sir 🙏 Dobara zaroor aana!",
         "cancelled": "Order cancel kar diya gaya hai sir. Kuch aur chahiye to bataiye 🙏",
     }
     reply = Reply(text=stages.get(status, f"Order status: {status}"), intent=f"status_{status}")

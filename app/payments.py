@@ -14,14 +14,28 @@ import secrets
 from datetime import datetime, timedelta
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .models import Order, Payment
+from .security import audit
 from .utils import money, rupees, utcnow
 
 RAZORPAY_API = "https://api.razorpay.com/v1"
+
+
+class PaymentProviderError(RuntimeError):
+    """Live provider (Razorpay) se payment link nahi bana — caller ko clearly batana hai."""
+
+
+class PaymentAmountMismatch(ValueError):
+    """Provider ka paid amount order ke total se match nahi karta."""
+
+
+def to_paise(amount: float) -> int:
+    """Rupees -> integer paise (float drift se bachne ke liye Decimal-like rounding)."""
+    return int(round(float(amount) * 100))
 
 
 def _base_url() -> str:
@@ -35,6 +49,7 @@ def create_payment(db: Session, order: Order, base_url: str | None = None) -> Pa
     """Order ke liye payment banayo. Live: Razorpay link. Demo: local page."""
     base_url = (base_url or _base_url()).rstrip("/")
     if settings.payment_live:
+        # live me kabhi bhi mock link nahi — provider fail ho to error (caller alert karega)
         link, ref = _razorpay_create_link(order)
         provider = "razorpay"
     else:
@@ -84,9 +99,8 @@ def _razorpay_create_link(order: Order) -> tuple[str, str]:
             data = response.json()
         return data.get("short_url") or data.get("id", ""), data.get("id", "")
     except Exception as exc:
-        # Razorpay down / key galat — mock page par gir jao taaki kaam ruke nahi
-        token = secrets.token_urlsafe(12)
-        return f"{_base_url()}/pay/{token}", f"fallback_{token} ({str(exc)[:80]})"
+        # Live mode me mock page par fallback NAHI — customer ko fake/demo link kabhi nahi jana chahiye
+        raise PaymentProviderError(f"Razorpay payment link nahi bana: {str(exc)[:120]}") from exc
 
 
 def payment_by_token(db: Session, token: str) -> tuple[Payment | None, Order | None]:
@@ -101,23 +115,62 @@ def payment_by_token(db: Session, token: str) -> tuple[Payment | None, Order | N
     return None, None
 
 
-def mark_paid(db: Session, payment: Payment, ref: str | None = None, via: str = "webhook") -> Order | None:
-    """Payment success — idempotent (ek hi baar asar karega)."""
+def settle_payment(
+    db: Session,
+    payment: Payment,
+    *,
+    ref: str | None = None,
+    via: str = "webhook",
+    amount_paise: int | None = None,
+    currency: str | None = "INR",
+) -> bool:
+    """Payment ko 'paid' karo — SIRF EK BAAR. True = is call ne transition kiya; False = pehle se paid / mismatch.
+
+    Race-safe: conditional UPDATE (WHERE status != 'paid') — do parallel webhooks bhi ek hi jeetega.
+    Provider amount diye gaye hain to order total se reconcile karte hain (paise me).
+    """
     if payment.status == "paid":
-        return db.get(Order, payment.order_id)
-    payment.status = "paid"
-    payment.paid_at = utcnow()
-    if ref:
-        payment.provider_ref = ref
+        return False
     order = db.get(Order, payment.order_id)
-    if order:
-        order.payment_status = "paid"
-        order.paid_at = utcnow()
-        if order.order_status in {"placed", "awaiting_payment"}:
-            order.order_status = "confirmed"
-        order.payment_ref = payment.provider_ref
+    if order is None:
+        return False
+    if amount_paise is not None:
+        expected = to_paise(order.total_amount)
+        if amount_paise != expected or (currency or "INR") != "INR":
+            audit(
+                db,
+                actor=f"webhook:{via}",
+                action="payment.amount_mismatch",
+                target=f"order:{order.order_no}",
+                details={"expected_paise": expected, "received_paise": amount_paise, "currency": currency},
+            )
+            db.flush()
+            return False
+
+    now = utcnow()
+    result = db.execute(
+        update(Payment)
+        .where(Payment.id == payment.id, Payment.status != "paid")
+        .values(status="paid", paid_at=now, provider_ref=ref or payment.provider_ref)
+    )
+    if result.rowcount != 1:
+        db.refresh(payment)
+        return False
+    db.refresh(payment)
+    order.payment_status = "paid"
+    order.paid_at = now
+    if order.order_status in {"placed", "awaiting_payment"}:
+        order.order_status = "confirmed"
+    order.payment_ref = payment.provider_ref
+    audit(db, actor=f"payment:{via}", action="payment.settled", target=f"order:{order.order_no}", details={"amount": order.total_amount, "provider": payment.provider})
     db.flush()
-    return order
+    return True
+
+
+def mark_paid(db: Session, payment: Payment, ref: str | None = None, via: str = "webhook") -> Order | None:
+    """Backward-compatible wrapper: order return karta hai (paid ho ya pehle se paid)."""
+    settle_payment(db, payment, ref=ref, via=via)
+    return db.get(Order, payment.order_id)
 
 
 def find_payment(db: Session, provider_ref: str | None = None, order_no: str | None = None) -> Payment | None:
@@ -133,10 +186,15 @@ def find_payment(db: Session, provider_ref: str | None = None, order_no: str | N
 
 
 def verify_razorpay_signature(body: bytes, signature: str | None) -> bool:
-    """Razorpay webhook signature check (X-Razorpay-Signature)."""
-    secret = settings.razorpay_webhook_secret or settings.razorpay_key_secret
+    """Razorpay webhook signature (X-Razorpay-Signature) — RAZORPAY_WEBHOOK_SECRET se.
+
+    Fail-closed: live mode ya production me secret khaali ho to webhook REJECT.
+    API key secret se verify nahi karte (Razorpay webhook ka alag secret hota hai).
+    """
+    secret = settings.razorpay_webhook_secret
     if not secret:
-        return True  # demo mode
+        # sirf local mock demo me unsigned allowed
+        return not settings.payment_live and not settings.is_production
     if not signature:
         return False
     expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
@@ -160,6 +218,8 @@ def parse_razorpay_event(body: bytes) -> dict:
         "reference_id": entity.get("reference_id"),
         "order_no": notes.get("order_no") or (entity.get("reference_id") or "").replace("order_", ""),
         "amount": (entity.get("amount") or entity.get("amount_paid") or 0) / 100,
+        "amount_paise": int(entity.get("amount") or entity.get("amount_paid") or 0),
+        "currency": entity.get("currency"),
         "status": entity.get("status"),
         "paid": bool(entity.get("status") in {"paid", "captured"} or event in {"payment_link.paid", "payment.captured"}),
     }
