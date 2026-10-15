@@ -1,0 +1,794 @@
+<!doctype html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sharma Cafe — WhatsApp Agent Dashboard</title>
+<style>
+  :root{
+    --bg:#0b1120; --bg2:#111827; --card:#151d2e; --card2:#1b2537; --line:#26314a;
+    --txt:#e8eef8; --muted:#93a2bd; --green:#22c55e; --green2:#16a34a; --amber:#f59e0b;
+    --red:#ef4444; --blue:#3b82f6; --purple:#a855f7; --radius:14px;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--txt);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;font-size:14px}
+  a{color:var(--blue)}
+  button{font-family:inherit}
+  .app{display:flex;min-height:100vh}
+  /* ---------- sidebar ---------- */
+  .side{width:216px;flex:0 0 216px;background:linear-gradient(180deg,#0e1626,#0b1120);
+    border-right:1px solid var(--line);padding:16px 12px;position:sticky;top:0;height:100vh;overflow:auto}
+  .brand{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+  .logo{width:38px;height:38px;border-radius:11px;background:linear-gradient(135deg,#22c55e,#0ea5e9);
+    display:grid;place-items:center;font-size:20px}
+  .brand h1{font-size:15px;margin:0;line-height:1.2}
+  .brand div small{color:var(--muted);font-size:11px}
+  .nav{margin-top:16px;display:flex;flex-direction:column;gap:3px}
+  .nav button{display:flex;align-items:center;gap:9px;width:100%;background:transparent;border:0;color:var(--muted);
+    padding:9px 11px;border-radius:10px;cursor:pointer;font-size:13.5px;text-align:left}
+  .nav button:hover{background:#162034;color:var(--txt)}
+  .nav button.on{background:linear-gradient(90deg,#1d293f,#16233a);color:#fff;box-shadow:inset 0 0 0 1px var(--line)}
+  .nav .ico{width:18px;text-align:center}
+  .nav .badge{margin-left:auto;background:var(--red);color:#fff;border-radius:999px;font-size:10px;padding:1px 6px}
+  .modes{margin-top:18px;border-top:1px solid var(--line);padding-top:12px;display:flex;flex-direction:column;gap:6px}
+  .chip{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);
+    background:#101a2c;border:1px solid var(--line);border-radius:999px;padding:3px 9px;width:max-content}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--green)}
+  .dot.warn{background:var(--amber)} .dot.live{background:var(--green)} .dot.demo{background:var(--amber)}
+  /* ---------- main ---------- */
+  .main{flex:1;min-width:0;padding:18px 22px 60px}
+  .topbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+  .topbar h2{margin:0;font-size:19px}
+  .topbar .sub{color:var(--muted);font-size:12.5px}
+  .grow{flex:1}
+  .btn{background:#1c2740;color:var(--txt);border:1px solid var(--line);border-radius:10px;padding:8px 13px;
+    cursor:pointer;font-size:13px}
+  .btn:hover{border-color:#3a4a6d}
+  .btn.primary{background:linear-gradient(135deg,var(--green),var(--green2));border:0;color:#06240f;font-weight:600}
+  .btn.amber{background:#3a2a09;border-color:#5b4310;color:#fbbf24}
+  .btn.red{background:#3a1414;border-color:#5b2020;color:#fca5a5}
+  .btn.sm{padding:5px 9px;font-size:12px;border-radius:8px}
+  .grid{display:grid;gap:14px}
+  .cards{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:15px}
+  .card h3{margin:0 0 10px;font-size:13px;color:var(--muted);font-weight:600;letter-spacing:.02em;text-transform:uppercase}
+  .kpi{font-size:26px;font-weight:700;letter-spacing:-.5px}
+  .kpi small{font-size:12px;color:var(--muted);font-weight:500}
+  .two{grid-template-columns:1.35fr 1fr}
+  .three{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+  table{width:100%;border-collapse:collapse}
+  th{text-align:left;color:var(--muted);font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;
+    padding:7px 8px;border-bottom:1px solid var(--line)}
+  td{padding:8px;border-bottom:1px solid #1c2437;vertical-align:top}
+  tr:hover td{background:#162034}
+  .pill{display:inline-block;font-size:11px;padding:2.5px 8px;border-radius:999px;background:#1c2740;color:var(--muted)}
+  .pill.paid,.pill.p-ok{background:#0c2c1a;color:#4ade80}
+  .pill.pending,.pill.p-warn{background:#3a2a09;color:#fbbf24}
+  .pill.cod{background:#0f2a3d;color:#60a5fa}
+  .pill.bad{background:#3a1414;color:#fca5a5}
+  .pill.good{background:#0c2c1a;color:#4ade80}
+  .muted{color:var(--muted)}
+  .tiny{font-size:11.5px}
+  input,textarea,select{background:#0f1728;border:1px solid var(--line);color:var(--txt);border-radius:10px;
+    padding:9px 11px;font-family:inherit;font-size:13px;width:100%}
+  input:focus,textarea:focus,select:focus{outline:1px solid #33507e}
+  label{font-size:11.5px;color:var(--muted);display:block;margin-bottom:4px}
+  .row{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
+  .row > *{flex:1;min-width:110px}
+  .row .fix{flex:0 0 auto;min-width:0}
+  .bars{display:flex;align-items:flex-end;gap:4px;height:96px;margin-top:6px}
+  .bars div{flex:1;background:linear-gradient(180deg,#22c55e,#0e7490);border-radius:4px 4px 0 0;min-height:3px;position:relative}
+  .bars div span{position:absolute;bottom:-17px;left:50%;transform:translateX(-50%);font-size:9px;color:var(--muted)}
+  /* ---------- chat ---------- */
+  .chat{display:grid;grid-template-columns:270px 1fr;gap:14px;height:calc(100vh - 150px)}
+  .threads{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);overflow:auto}
+  .thread{padding:10px 12px;border-bottom:1px solid #1c2437;cursor:pointer}
+  .thread:hover{background:#162034}
+  .thread.on{background:#1b2740;box-shadow:inset 3px 0 0 var(--green)}
+  .thread b{font-size:13px} .thread p{margin:2px 0 0;color:var(--muted);font-size:11.5px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .chatbox{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);display:flex;flex-direction:column;min-height:0}
+  .chathead{display:flex;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid var(--line)}
+  .msgs{flex:1;overflow:auto;padding:16px;display:flex;flex-direction:column;gap:9px;background:
+    radial-gradient(1200px 400px at 20% -10%,#132033,transparent)}
+  .b{max-width:74%;padding:9px 12px;border-radius:13px;line-height:1.45;white-space:pre-wrap;word-wrap:break-word;font-size:13.5px}
+  .b.out{background:#0f3a24;border:1px solid #17512f;align-self:flex-end;border-bottom-right-radius:4px}
+  .b.in{background:#1c2437;border:1px solid var(--line);align-self:flex-start;border-bottom-left-radius:4px}
+  .b .meta{display:block;margin-top:5px;font-size:10px;color:#7f8ea8}
+  .compose{border-top:1px solid var(--line);padding:11px;display:flex;gap:9px;align-items:flex-end}
+  .compose textarea{resize:none;height:44px}
+  .suggest{display:flex;gap:6px;flex-wrap:wrap;padding:0 11px 11px}
+  .suggest button{background:#162034;border:1px solid var(--line);color:var(--muted);border-radius:999px;
+    padding:5px 11px;font-size:11.5px;cursor:pointer}
+  .suggest button:hover{color:var(--txt);border-color:#3a4a6d}
+  .toast{position:fixed;right:18px;bottom:18px;background:#152238;border:1px solid var(--line);border-left:3px solid var(--green);
+    padding:12px 16px;border-radius:12px;box-shadow:0 14px 40px rgba(0,0,0,.5);max-width:340px;display:none;z-index:50}
+  .toast.err{border-left-color:var(--red)}
+  .empty{color:var(--muted);text-align:center;padding:26px;font-size:13px}
+  pre{background:#0d1524;border:1px solid var(--line);border-radius:10px;padding:12px;overflow:auto;
+    font-size:12px;line-height:1.5;white-space:pre-wrap}
+  .stars{color:var(--amber);letter-spacing:1px}
+  .divider{height:1px;background:var(--line);margin:14px 0}
+  @media (max-width:900px){
+    .app{flex-direction:column}
+    .side{width:auto;flex:none;height:auto;position:static;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+    .nav{flex-direction:row;flex-wrap:wrap;margin-top:8px}
+    .two,.chat{grid-template-columns:1fr}
+    .chat{height:auto}
+    .msgs{height:52vh}
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand">
+      <div class="logo">🍽️</div>
+      <div>
+        <h1 id="brandName">Sharma Cafe</h1>
+        <small id="agentName">Bablu • Digital Waiter</small>
+      </div>
+    </div>
+    <nav class="nav" id="nav"></nav>
+    <div class="modes" id="modeChips"></div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <h2 id="pageTitle">Overview</h2>
+        <div class="sub" id="pageSub">—</div>
+      </div>
+      <div class="grow"></div>
+      <button class="btn" onclick="refresh()">↻ Refresh</button>
+      <button class="btn amber" onclick="runAutomation()">⚡ Run due tasks</button>
+      <button class="btn red" onclick="resetDemo()">🧪 Reset demo data</button>
+    </div>
+    <div id="view"></div>
+  </main>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+/* ============================ helpers ============================ */
+const qs = new URLSearchParams(location.search);
+const TOKEN = qs.get("token") || "";
+const PAGE = qs.get("page") || "overview";
+const TABS = [
+  ["overview","📊","Overview"],["chat","💬","Live Chat"],["orders","🧾","Orders"],["menu","📖","Menu"],
+  ["customers","🧠","Memory"],["offers","🎁","Offers"],["campaigns","📣","Campaigns"],["reservations","📅","Table Booking"],
+  ["feedback","⭐","Feedback"],["alerts","🚨","Alerts"],["automation","🤖","Automation"],["settings","⚙️","Settings"],
+];
+let STATE = { page: PAGE, summary: null, chatPhone: qs.get("phone") || "919876543210", chatName: null, alerts: 0 };
+
+function api(path, opts={}){
+  const headers = Object.assign({"Content-Type":"application/json"}, opts.headers||{});
+  if (TOKEN) headers["X-Admin-Token"] = TOKEN;
+  const url = path + (path.includes("?") ? "&" : "?") + (TOKEN ? "token="+encodeURIComponent(TOKEN) : "");
+  return fetch(url, Object.assign({}, opts, {headers}))
+    .then(async r => { const t = await r.text(); let d; try { d = t? JSON.parse(t): null } catch(e){ d = t }
+      if(!r.ok) throw new Error((d && d.detail) ? d.detail : ("HTTP "+r.status)); return d; });
+}
+function toast(msg, err=false){
+  const el = document.getElementById("toast");
+  el.textContent = msg; el.className = "toast" + (err?" err":""); el.style.display="block";
+  clearTimeout(el._t); el._t = setTimeout(()=>el.style.display="none", 4200);
+}
+const esc = s => String(s==null?"":s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const rs  = n => "₹" + Number(n||0).toLocaleString("en-IN", {maximumFractionDigits:0});
+const rs2 = n => "₹" + Number(n||0).toLocaleString("en-IN", {minimumFractionDigits:2, maximumFractionDigits:2});
+const stars = n => "★".repeat(Number(n)||0) + "☆".repeat(Math.max(0,5-(Number(n)||0)));
+function go(page){ STATE.page = page; const u = new URL(location); u.searchParams.set("page", page); history.replaceState(null,"",u); render(); }
+function link(page){ const u = new URL(location); u.searchParams.set("page", page); location.href = u.toString(); }
+
+/* ============================ chrome ============================ */
+function renderNav(){
+  const nav = document.getElementById("nav");
+  nav.innerHTML = TABS.map(([id,ico,label])=>`
+    <button class="${STATE.page===id?"on":""}" onclick="go('${id}')">
+      <span class="ico">${ico}</span>${label}
+      ${id==="alerts" && STATE.alerts ? `<span class="badge">${STATE.alerts}</span>` : ""}
+    </button>`).join("");
+}
+
+function renderModes(){
+  const m = STATE.summary?.modes || {};
+  const chip = (label, live, text) => `<span class="chip"><span class="dot ${live?"live":"demo"}"></span>${label}: ${esc(text)}</span>`;
+  document.getElementById("modeChips").innerHTML = [
+    chip("WhatsApp", m.whatsapp_live, m.whatsapp_live? "Live API" : "Mock (demo)"),
+    chip("AI", m.llm_live, m.llm_live? esc(m.llm_model||"live") : "Built-in brain"),
+    chip("Payment", m.payment_live, m.payment_live? "Razorpay" : "Mock page"),
+    chip("DB", false, esc(m.database||"—")),
+    chip("GST", false, (m.gst_percent??0)+"%"),
+    chip("Automation", m.automation_enabled, m.automation_enabled? "ON" : "OFF"),
+  ].join("");
+}
+
+/* ============================ pages ============================ */
+async function viewOverview(){
+  const s = await api("/api/summary"); STATE.summary = s;
+  const t = s.today, w = s.week;
+  const maxOrders = Math.max(1, ...(t.hourly||[]).map(h=>h.orders));
+  const bars = (t.hourly||[]).map(h=>`<div style="height:${Math.max(3,(h.orders/maxOrders)*100)}%" title="${h.hour}:00 — ${h.orders} orders"><span>${h.hour}</span></div>`).join("");
+  const kpis = [
+    ["Aaj ki sale", rs(t.sales), `${t.paid_orders} paid / ${t.orders} order`],
+    ["Avg bill", rs(t.avg_order_value), `${t.orders} orders aaj`],
+    ["Naye customer", t.new_customers, `Total memory: ${s.customers}`],
+    ["Pending payment", rs(t.pending_amount), `${s.pending_orders} order pending`],
+    ["Rating", (t.avg_rating||"—")+" / 5", `${t.feedback_count} feedback aaj`],
+    ["Table booking", t.reservations, `${s.upcoming_reservations} aane wali`],
+    ["Discount diya", rs(t.discount_given), "rule engine se, AI se nahi"],
+    ["Alerts", s.open_alerts, t.complaints? `${t.complaints} complaint aaj` : "sab theek hai"],
+  ];
+  return `
+  <div class="grid cards">
+    ${kpis.map(([l,v,s2])=>`<div class="card"><h3>${l}</h3><div class="kpi">${v}</div><div class="tiny muted">${esc(s2)}</div></div>`).join("")}
+  </div>
+  <div class="grid two" style="margin-top:14px">
+    <div class="card">
+      <h3>Ghnte ke hisaab se orders (IST)</h3>
+      <div class="bars">${bars}</div>
+    </div>
+    <div class="card">
+      <h3>Sabse zyada bika aaj</h3>
+      ${(t.top_items.length? `<table><tbody>${t.top_items.map(([name,qty])=>`<tr><td>${esc(name)}</td><td style="text-align:right" class="muted">${qty}x</td></tr>`).join("")}</tbody></table>`
+        : `<div class="empty">Aaj abhi koi order nahi — Live Chat se ek order karke dekho 😄</div>`)}
+      <div class="divider"></div>
+      <h3>Hafte ka hisaab</h3>
+      <div class="tiny">Sale: <b>${rs(w.sales)}</b> • Orders: <b>${w.orders}</b> • Naye customer: <b>${w.new_customers}</b> • Rating: <b>${w.avg_rating||"—"}</b></div>
+    </div>
+  </div>
+  <div class="grid two" style="margin-top:14px">
+    <div class="card">
+      <h3>Latest orders</h3>
+      <table><thead><tr><th>#</th><th>Customer</th><th>Items</th><th>Total</th><th>Payment</th><th>Status</th><th>Kab</th></tr></thead>
+      <tbody>${(s.recent_orders||[]).map(o=>`<tr>
+        <td>${esc(o.order_no)}</td><td>${esc(o.name||o.phone)}</td>
+        <td class="tiny muted">${esc(o.items_text)}</td><td>${rs(o.total)}</td>
+        <td><span class="pill ${o.payment_status}">${esc(o.payment_status)}</span></td>
+        <td><span class="pill">${esc(o.order_status)}</span></td><td class="tiny muted">${esc(o.at||"")}</td></tr>`).join("")}
+      </tbody></table>
+    </div>
+    <div class="card">
+      <h3>Owner ke alerts</h3>
+      ${(s.recent_alerts||[]).map(a=>`<div style="padding:8px 0;border-bottom:1px solid #1c2437">
+        <span class="pill ${a.kind==="complaint"?"bad":"good"}">${esc(a.kind)}</span>
+        <div class="tiny" style="margin-top:5px;white-space:pre-wrap">${esc(a.message)}</div>
+        <div class="tiny muted">${esc(a.at||"")}</div></div>`).join("") || `<div class="empty">Koi alert nahi 🎉</div>`}
+    </div>
+  </div>
+  <div class="card" style="margin-top:14px">
+    <h3>Aaj ki owner report (jo WhatsApp par jaati hai)</h3>
+    <pre>${esc((await api("/api/reports/daily")).text)}</pre>
+  </div>`;
+}
+
+async function viewChat(){
+  const convs = await api("/api/conversations");
+  const threads = convs.map(c=>`<div class="thread ${c.phone===STATE.chatPhone?"on":""}" onclick="openChat('${c.phone}','${esc(c.name||"")}')">
+      <b>${esc(c.name || c.phone)}</b>${c.human_mode? ' <span class="pill bad">staff</span>':''}
+      <p>${c.direction==="in"?"👤 ":"🤖 "}${esc(c.last_message)}</p>
+      <p class="tiny">${esc(c.at||"")}</p></div>`).join("") || `<div class="empty">Abhi koi chat nahi</div>`;
+  const chat = await api("/api/messages/"+encodeURIComponent(STATE.chatPhone));
+  const msgs = chat.messages.map(m=>`<div class="b ${m.direction==="in"?"in":"out"}">${esc(m.text)}
+      <span class="meta">${m.direction==="in"?"Customer":"Bablu"} • ${esc(m.at||"")}${m.intent? " • "+esc(m.intent):""}</span></div>`).join("")
+      || `<div class="empty">Yahan se message bhej ke agent ko test karo 👇</div>`;
+  const outbox = await api("/api/outbox?limit=6");
+  return `
+  <div class="chat">
+    <div class="threads">
+      <div style="padding:11px 12px;border-bottom:1px solid var(--line)">
+        <label>Naya number par chat</label>
+        <div class="row"><input id="newPhone" placeholder="9198…" value="${esc(STATE.chatPhone)}">
+        <button class="btn fix sm" onclick="openChat(document.getElementById('newPhone').value,'')">Open</button></div>
+      </div>
+      ${threads}
+    </div>
+    <div class="chatbox">
+      <div class="chathead">
+        <b>${esc(chat.name || STATE.chatName || chat.phone)}</b>
+        <span class="tiny muted">${esc(chat.phone)}</span>
+        <div class="grow"></div>
+        <button class="btn sm ${chat.human_mode?"amber":""}" onclick="toggleHuman('${chat.phone}',${chat.human_mode?0:1})">
+          ${chat.human_mode? "🤝 Human mode ON (agent chup)" : "🤝 Hand over to staff"}</button>
+      </div>
+      <div class="msgs" id="msgs">${msgs}</div>
+      <div class="suggest">
+        ${["hi","menu bhejo","2 paneer butter masala, 4 butter naan","aaj shaam 7 baje 4 logo ki table book karni hai","kuch achha batao","mera naam Rahul hai","5","stop","insaan se baat karni hai","aaj ki sale batado"]
+          .map(s=>`<button onclick="fill('${esc(s)}')">${esc(s)}</button>`).join("")}
+      </div>
+      <div class="compose">
+        <textarea id="chatInput" placeholder="Customer ki tarah likho… (Enter = bhejo)"></textarea>
+        <button class="btn primary fix" onclick="sendChat()">Bhejo ➤</button>
+      </div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:14px">
+    <h3>Outbox — mock mode me yahan "bheja" gaya</h3>
+    <table><tbody>${outbox.reverse().map(o=>`<tr><td class="tiny">${esc(o.to)}</td><td class="tiny muted">${esc((o.payload&&o.payload.body)||o.kind)}</td>
+      <td class="tiny"><span class="pill ${o.ok?"good":"bad"}">${o.mode}</span></td></tr>`).join("") || `<tr><td class="muted tiny">Kuch nahi</td></tr>`}</tbody></table>
+  </div>`;
+}
+
+function openChat(phone, name){ STATE.chatPhone = phone; STATE.chatName = name; render(); }
+function fill(text){ document.getElementById("chatInput").value = text; document.getElementById("chatInput").focus(); }
+
+async function sendChat(){
+  const input = document.getElementById("chatInput");
+  const text = input.value.trim(); if(!text) return;
+  input.value=""; input.disabled=true;
+  try{
+    const res = await api("/api/simulate", {method:"POST", body:JSON.stringify({phone: STATE.chatPhone, text})});
+    if (res.replies && res.replies.length) toast("Agent ne reply bhej diya ("+res.intent+")");
+    else toast("Message process hua ("+res.intent+")");
+    await render();
+    const el = document.getElementById("msgs"); if(el) el.scrollTop = el.scrollHeight;
+  }catch(e){ toast("Error: "+e.message, true); }
+  input.disabled=false; input.focus();
+}
+
+async function toggleHuman(phone, on){
+  await api("/api/customers/"+encodeURIComponent(phone), {method:"PATCH", body: JSON.stringify({human_mode: !!on})});
+  toast(on? "Human mode ON — ab agent reply nahi karega" : "Human mode OFF — agent wapas sambhal lega");
+  render();
+}
+
+async function viewOrders(){
+  const orders = await api("/api/orders?limit=120");
+  const rows = orders.map(o=>`<tr>
+    <td><b>${esc(o.order_no)}</b><div class="tiny muted">${esc(o.channel)}${o.table? " • table "+esc(o.table):""}</div></td>
+    <td>${esc(o.name||o.phone)}<div class="tiny muted">${esc(o.phone)}</div></td>
+    <td class="tiny">${esc(o.items_text)}${(o.freebies&&o.freebies.length)? `<div class="tiny" style="color:#fbbf24">🎁 ${esc(o.freebies.join(", "))}</div>`:""}</td>
+    <td>${rs2(o.subtotal)}${o.discount_amount? `<div class="tiny" style="color:#4ade80">-${rs2(o.discount_amount)} ${esc(o.discount_code||"")}</div>`:""}
+        <div><b>${rs2(o.total)}</b></div></td>
+    <td><span class="pill ${o.payment_status}">${esc(o.payment_status)}</span></td>
+    <td><span class="pill">${esc(o.order_status)}</span></td>
+    <td class="tiny muted">${esc(o.at||"")}</td>
+    <td class="tiny">
+      ${o.payment_status!=="paid"? `<button class="btn sm" onclick="markPaid('${esc(o.order_no)}')">💰 Paid</button>`:""}
+      ${o.payment_status==="pending" && o.payment_link? `<a class="btn sm" href="${esc(o.payment_link)}" target="_blank">🔗 Pay page</a>`:""}
+      <button class="btn sm" onclick="setStatus('${esc(o.order_no)}','preparing')">👨‍🍳</button>
+      <button class="btn sm" onclick="setStatus('${esc(o.order_no)}','out_for_delivery')">🛵</button>
+      <button class="btn sm" onclick="setStatus('${esc(o.order_no)}','delivered')">✅</button>
+    </td></tr>`).join("");
+  const menu = await api("/api/menu");
+  return `
+  <div class="card">
+    <h3>Manual order (walk-in / phone) — QR table order bhi yahi se</h3>
+    <div class="row">
+      <div><label>Phone</label><input id="moPhone" placeholder="9198…" value="919876543210"></div>
+      <div><label>Naam</label><input id="moName" placeholder="Rahul"></div>
+      <div><label>Table (optional)</label><input id="moTable" placeholder="4"></div>
+      <div style="flex:2"><label>Items (chat jaise likho)</label><input id="moItems" placeholder="2 paneer butter masala, 4 butter naan"></div>
+      <div class="fix"><label>COD?</label><select id="moCod"><option value="">Nahi (link bhejo)</option><option value="1">Haan</option></select></div>
+      <button class="btn primary fix" onclick="createOrder()">Order banao</button>
+    </div>
+    <div class="tiny muted" style="margin-top:8px">Menu me se kuch: ${menu.slice(0,10).map(m=>esc(m.name)).join(" • ")} …</div>
+  </div>
+  <div class="card" style="margin-top:14px">
+    <h3>Orders (latest pehle)</h3>
+    <table><thead><tr><th>#</th><th>Customer</th><th>Items</th><th>Bill</th><th>Payment</th><th>Status</th><th>Kab</th><th>Actions</th></tr></thead>
+    <tbody>${rows || `<tr><td colspan="8" class="empty">Koi order nahi</td></tr>`}</tbody></table>
+  </div>`;
+}
+
+async function createOrder(){
+  const body = {
+    phone: document.getElementById("moPhone").value,
+    name: document.getElementById("moName").value,
+    table: document.getElementById("moTable").value,
+    items_text: document.getElementById("moItems").value,
+    cod: !!document.getElementById("moCod").value,
+  };
+  try{ const r = await api("/api/orders", {method:"POST", body: JSON.stringify(body)});
+    toast("Order "+r.order.order_no+" ban gaya — "+rs(r.order.total));
+    render();
+  }catch(e){ toast("Error: "+e.message, true); }
+}
+async function markPaid(order_no){ try{ await api("/api/demo/simulate-payment/"+order_no, {method:"POST"}); toast("Payment mil gaya ✅ thanks message chala gaya"); render(); }catch(e){ toast(e.message, true); } }
+async function setStatus(order_no, status){ try{ await api("/api/orders/"+order_no, {method:"PATCH", body: JSON.stringify({order_status: status})}); toast("Status "+status+" — customer ko update chala gaya"); render(); }catch(e){ toast(e.message, true); } }
+
+async function viewMenu(){
+  const menu = await api("/api/menu");
+  const cats = [...new Set(menu.map(m=>m.category))];
+  const rows = menu.map(m=>`<tr>
+    <td>${m.is_veg? "🟢":"🔴"} <b>${esc(m.name)}</b>${m.is_signature? " ⭐":""}
+      <div class="tiny muted">${esc((m.aliases||[]).slice(0,4).join(", "))}</div></td>
+    <td>${esc(m.category)}</td>
+    <td>${rs(m.price)}</td>
+    <td class="tiny muted">${m.sold_count} bik chuka</td>
+    <td><span class="pill ${m.is_available?"good":"bad"}">${m.is_available?"available":"hidden"}</span></td>
+    <td class="tiny">
+      <button class="btn sm" onclick="editPrice(${m.id}, ${m.price})">✏️ Price</button>
+      <button class="btn sm" onclick="toggleItem(${m.id}, ${m.is_available?0:1})">${m.is_available? "🚫 Hide":"✅ Show"}</button>
+    </td></tr>`).join("");
+  return `
+  <div class="card">
+    <h3>WhatsApp par jaane wala menu (asli text)</h3>
+    <pre>${esc((await api("/api/menu/preview")).text)}</pre>
+  </div>
+  <div class="card" style="margin-top:14px">
+    <h3>Naya item jodo</h3>
+    <div class="row">
+      <div style="flex:1.6"><label>Naam</label><input id="niName" placeholder="Paneer Lababdar"></div>
+      <div><label>Price</label><input id="niPrice" placeholder="290"></div>
+      <div><label>Category</label><input id="niCat" list="catlist" placeholder="Main Course">
+        <datalist id="catlist">${cats.map(c=>`<option value="${esc(c)}">`).join("")}</datalist></div>
+      <div class="fix"><label>Veg?</label><select id="niVeg"><option value="1">Veg</option><option value="">Non-veg</option></select></div>
+      <div class="fix"><label>Signature?</label><select id="niSig"><option value="">Nahi</option><option value="1">Haan ⭐</option></select></div>
+      <button class="btn primary fix" onclick="addItem()">Add</button>
+    </div>
+  </div>
+  <div class="card" style="margin-top:14px">
+    <h3>Menu (${menu.length} items)</h3>
+    <table><thead><tr><th>Item</th><th>Category</th><th>Price</th><th>Bikri</th><th>Status</th><th></th></tr></thead>
+    <tbody>${rows}</tbody></table>
+  </div>`;
+}
+async function addItem(){
+  const body = {name: niName.value, price: niPrice.value, category: niCat.value||"Other",
+    is_veg: !!niVeg.value, is_signature: !!niSig.value};
+  try{ await api("/api/menu", {method:"POST", body: JSON.stringify(body)}); toast("Item add ho gaya"); render(); }
+  catch(e){ toast(e.message, true); }
+}
+async function editPrice(id, price){
+  const value = prompt("Naya price likho (₹):", price); if(value===null) return;
+  try{ await api("/api/menu/"+id, {method:"PATCH", body: JSON.stringify({price: Number(value)})}); toast("Price update ho gaya"); render(); }
+  catch(e){ toast(e.message, true); }
+}
+async function toggleItem(id, on){
+  await api("/api/menu/"+id, {method:"PATCH", body: JSON.stringify({is_available: !!on})}); render();
+}
+
+async function viewCustomers(){
+  const seg = STATE.segment || "";
+  const searchQ = STATE.searchQ || "";
+  const url = searchQ ? "/api/customers?q="+encodeURIComponent(searchQ)
+                      : (seg ? "/api/customers?segment="+seg : "/api/customers");
+  const rows = await api(url);
+  const table = rows.map(c=>`<tr>
+    <td><b>${esc(c.name||"—")}</b><div class="tiny muted">${esc(c.phone)}</div></td>
+    <td>${c.visits}<div class="tiny muted">${c.days_since_last_visit==null? "kabhi nahi": c.days_since_last_visit+" din pehle"}</div></td>
+    <td>${rs(c.total_spent)}</td>
+    <td>${c.loyalty_points} pts</td>
+    <td class="tiny">${esc((c.likes||[]).map(l=>l.name).join(", ")) || "—"}
+      ${(c.notes&&c.notes.length)? `<div class="tiny" style="color:#fbbf24">📝 ${esc(c.notes.join(", "))}</div>`:""}</td>
+    <td class="tiny">${c.birthday? "🎂 "+esc(c.birthday):"—"}</td>
+    <td>${c.opted_out? `<span class="pill bad">STOP</span>` : c.opt_in? `<span class="pill good">opt-in</span>`:`<span class="pill">no offer</span>`}</td>
+    <td class="tiny">${esc(c.last_order_summary||"—")}</td>
+    <td class="tiny">
+      <button class="btn sm" onclick="chatWith('${esc(c.phone)}','${esc(c.name||"")}')">💬</button>
+      <button class="btn sm" onclick="note('${esc(c.phone)}')">📝</button>
+      <button class="btn sm" onclick="toggleOpt('${esc(c.phone)}',${c.opt_in?0:1})">${c.opt_in? "🚫 opt-out":"✅ opt-in"}</button>
+    </td></tr>`).join("");
+  return `
+  <div class="card">
+    <h3>Memory / Segments</h3>
+    <div class="row">
+      <div><label>Search (naam ya number)</label><input id="cq" onkeydown="if(event.key==='Enter')searchCustomers()" placeholder="Rahul ya 9876"></div>
+      <div class="fix"><label>Segment</label><select onchange="STATE.segment=this.value; STATE.searchQ=''; render()">
+        <option value="">Sab (${rows.length})</option>
+        <option value="optin" ${seg==="optin"?"selected":""}>Opt-in wale</option>
+        <option value="winback" ${seg==="winback"?"selected":""}>30 din se gayab (winback)</option>
+        <option value="birthday" ${seg==="birthday"?"selected":""}>Is hafte birthday</option>
+      </select></div>
+      <button class="btn primary fix" onclick="searchCustomers()">Search</button>
+    </div>
+  </div>
+  <div class="card" style="margin-top:14px">
+    <h3>Customer memory (${rows.length})${searchQ? ` <span class="muted">— search: "${esc(searchQ)}"</span>` : seg? ` <span class="muted">— segment: ${esc(seg)}</span>` : ""}</h3>
+    <table><thead><tr><th>Customer</th><th>Visits</th><th>Kharcha</th><th>Points</th><th>Pasand / Notes</th><th>Birthday</th><th>Offers</th><th>Pichla order</th><th></th></tr></thead>
+    <tbody>${table || `<tr><td colspan="9" class="empty">Koi customer nahi</td></tr>`}</tbody></table>
+  </div>`;
+}
+async function searchCustomers(){
+  STATE.searchQ = document.getElementById("cq").value.trim();
+  STATE.segment = STATE.searchQ ? "" : STATE.segment;
+  if (STATE.searchQ) {
+    const rows = await api("/api/customers?q="+encodeURIComponent(STATE.searchQ));
+    toast(rows.length+" customer mile");
+  }
+  render();
+}
+function chatWith(phone, name){ STATE.chatPhone = phone; STATE.chatName = name; go("chat"); }
+async function note(phone){ const n = prompt("Yaad rakhne wali baat (jaise 'kam mirchi'):"); if(!n) return;
+  await api("/api/customers/"+encodeURIComponent(phone), {method:"PATCH", body: JSON.stringify({note:n})}); toast("Note save ho gaya"); render(); }
+async function toggleOpt(phone, on){ await api("/api/customers/"+encodeURIComponent(phone), {method:"PATCH", body: JSON.stringify({opt_in: !!on})}); render(); }
+
+async function viewOffers(){
+  const [rules, coupons, preview] = await Promise.all([api("/api/rules"), api("/api/coupons"), api("/api/campaigns/preview")]);
+  const ruleRows = rules.map(r=>`<tr>
+    <td><b>${esc(r.code||"—")}</b><div class="tiny muted">${esc(r.name)}</div></td>
+    <td><span class="pill">${esc(r.trigger)}</span><div class="tiny muted">${esc(JSON.stringify(r.condition||{}))}</div></td>
+    <td>${r.reward && r.reward.type==="percent"? r.reward.value+"% OFF" : "🎁 "+(r.reward?.item||"—")}</td>
+    <td class="tiny">${esc(r.message||"")}</td>
+    <td>${r.used_count}x</td>
+    <td><span class="pill ${r.is_active?"good":"bad"}">${r.is_active?"ON":"OFF"}</span></td>
+    <td class="tiny"><button class="btn sm" onclick="toggleRule(${r.id}, ${r.is_active?0:1})">${r.is_active?"🚫 Band":"✅ Chalu"}</button></td>
+  </tr>`).join("");
+  const couponRows = coupons.map(c=>`<tr><td><b>${esc(c.code)}</b></td>
+    <td>${c.percent? c.percent+"%":"—"} ${c.free_item? "🎁 "+esc(c.free_item):""}</td>
+    <td class="tiny">${esc(c.source||"")}</td><td class="tiny">${esc(c.phone||"sab ke liye")}</td>
+    <td>${c.is_used? `<span class="pill bad">used</span>`:`<span class="pill good">active</span>`}</td>
+    <td class="tiny muted">${esc(c.expiry||"")}</td></tr>`).join("");
+  return `
+  <div class="grid cards">
+    <div class="card"><h3>Total customers</h3><div class="kpi">${preview.total}</div><div class="tiny muted">Opt-in: ${preview.opt_in} • STOP kiya: ${preview.opted_out}</div></div>
+    <div class="card"><h3>Winback ready</h3><div class="kpi">${preview.winback_count}</div><div class="tiny muted">30+ din se gayab</div></div>
+    <div class="card"><h3>Birthday (aaj / hafta)</h3><div class="kpi">${preview.birthday_today} / ${preview.birthday_week}</div><div class="tiny muted">Coupon khud ban jaata hai</div></div>
+    <div class="card"><h3>Roz ki limit</h3><div class="kpi">${preview.limit_per_day}</div><div class="tiny muted">Spam se number bachane ke liye</div></div>
+  </div>
+  <div class="card" style="margin-top:14px">
+    <h3>Discount rules (Section 5 wali table)</h3>
+    <table><thead><tr><th>Code</th><th>Kab lagta hai</th><th>Kya milta hai</th><th>Message</th><th>Used</th><th>Status</th><th></th></tr></thead>
+    <tbody>${ruleRows}</tbody></table>
+    <div class="divider"></div>
+    <h3>Naya rule</h3>
+    <div class="row">
+      <div><label>Code</label><input id="rCode" placeholder="MONSOON20"></div>
+      <div><label>Naam</label><input id="rName" placeholder="Barish offer 20%"></div>
+      <div><label>Trigger</label><select id="rTrigger">
+        <option value="first_order">first_order</option><option value="nth_order">nth_order</option>
+        <option value="bill_amount">bill_amount</option><option value="birthday">birthday</option>
+        <option value="winback">winback</option><option value="manual">manual</option></select></div>
+      <div><label>Percent off</label><input id="rPercent" placeholder="20"></div>
+      <div><label>Free item (optional)</label><input id="rFree" placeholder="Cold Coffee"></div>
+      <div><label>Min bill (₹)</label><input id="rMin" placeholder="0"></div>
+      <button class="btn primary fix" onclick="addRule()">Add rule</button>
+    </div>
+  </div>
+  <div class="card" style="margin-top:14px">
+    <h3>Coupons (ek code ek hi baar chalta hai)</h3>
+    <div class="row" style="margin-bottom:10px">
+      <div><label>Percent</label><input id="cpPercent" placeholder="15"></div>
+      <div><label>Ya free item</label><input id="cpFree" placeholder="Gulab Jamun"></div>
+      <div><label>Kis customer ke liye</label><input id="cpPhone" placeholder="9198… (khaali = sab)"></div>
+      <div><label>Valid din</label><input id="cpDays" placeholder="30"></div>
+      <button class="btn primary fix" onclick="addCoupon()">Coupon banao</button>
+    </div>
+    <table><thead><tr><th>Code</th><th>Reward</th><th>Source</th><th>Kiske liye</th><th>Status</th><th>Expiry</th></tr></thead>
+    <tbody>${couponRows || `<tr><td colspan="6" class="empty">Koi coupon nahi</td></tr>`}</tbody></table>
+  </div>`;
+}
+async function toggleRule(id, on){ await api("/api/rules/"+id, {method:"PATCH", body: JSON.stringify({is_active: !!on})}); render(); }
+async function addRule(){
+  const body = {code: rCode.value||null, name: rName.value||"Naya rule", trigger: rTrigger.value,
+    condition: {min_bill: Number(rMin.value||0)}, reward: rFree.value? {type:"free_item", item:rFree.value} : {type:"percent", value: Number(rPercent.value||5)},
+    message: (rName.value||"Offer") + (rPercent.value? " — "+rPercent.value+"% OFF":"")};
+  try{ await api("/api/rules", {method:"POST", body: JSON.stringify(body)}); toast("Rule ban gaya"); render(); }catch(e){ toast(e.message,true); }
+}
+async function addCoupon(){
+  const body = {percent: Number(cpPercent.value||0), free_item: cpFree.value||null, phone: cpPhone.value||null, valid_days: Number(cpDays.value||30)};
+  try{ const r = await api("/api/coupons", {method:"POST", body: JSON.stringify(body)}); toast("Coupon ban gaya: "+r.code); render(); }catch(e){ toast(e.message,true); }
+}
+
+async function viewCampaigns(){
+  const [list, preview] = await Promise.all([api("/api/campaigns"), api("/api/campaigns/preview")]);
+  const rows = list.map(c=>`<tr><td><b>${esc(c.name)}</b><div class="tiny muted">${esc(c.kind)}</div></td>
+    <td class="tiny">${esc(c.message)}</td><td>${c.audience}</td><td>${c.sent}</td><td>${c.skipped}</td>
+    <td><span class="pill ${c.status==="sent"?"good":""}">${esc(c.status)}</span></td><td class="tiny muted">${esc(c.sent_at||c.at||"")}</td></tr>`).join("");
+  return `
+  <div class="card">
+    <h3>Proactive campaigns (permission ke saath hi jaate hain)</h3>
+    <div class="tiny muted">Opt-in: <b>${preview.opt_in}</b> customers • STOP kiye: <b>${preview.opted_out}</b> (unko kabhi message nahi jayega)</div>
+    <div class="divider"></div>
+    <div class="row">
+      <button class="btn primary fix" onclick="runCampaign('birthday')">🎂 Birthday wishes bhejo (${preview.birthday_today} aaj)</button>
+      <button class="btn amber fix" onclick="runCampaign('winback')">💌 Winback 20% OFF (${preview.winback_count})</button>
+    </div>
+    <div class="divider"></div>
+    <label>Broadcast message (sab opt-in customers ko)</label>
+    <textarea id="bcMsg" rows="3" placeholder="Aaj ka special: Buy 1 Get 1 Pizza 🍕 Sirf aaj ke liye!">Aaj ka special: Buy 1 Get 1 Pizza 🍕 Sirf aaj ke liye!</textarea>
+    <div class="row" style="margin-top:9px">
+      <button class="btn primary fix" onclick="broadcast(false)">📣 Sirf opt-in ko bhejo (safe)</button>
+      <button class="btn red fix" onclick="broadcast(true)">⚠️ Sabko bhejo (spam risk — demo only)</button>
+    </div>
+    <div class="tiny muted" style="margin-top:8px">Meta ka rule: bina permission offer bhejne se number ki quality girti hai. Isliye default sirf opt-in wale.</div>
+  </div>
+  <div class="card" style="margin-top:14px">
+    <h3>Campaign history</h3>
+    <table><thead><tr><th>Campaign</th><th>Message</th><th>Audience</th><th>Sent</th><th>Skipped</th><th>Status</th><th>Kab</th></tr></thead>
+    <tbody>${rows || `<tr><td colspan="7" class="empty">Koi campaign nahi chala</td></tr>`}</tbody></table>
+  </div>`;
+}
+async function runCampaign(kind){
+  try{ const r = await api("/api/campaigns/"+kind, {method:"POST"}); toast(`${kind}: ${r.sent} bheje, ${r.skipped} skip`); render(); }
+  catch(e){ toast(e.message,true); }
+}
+async function broadcast(force){
+  const message = document.getElementById("bcMsg").value.trim(); if(!message) return toast("Message khaali hai", true);
+  try{ const r = await api("/api/campaigns/broadcast", {method:"POST", body: JSON.stringify({message, only_opt_in: !force, force})});
+    toast(`Broadcast: ${r.sent} bheje / ${r.audience} audience`); render(); }catch(e){ toast(e.message,true); }
+}
+
+async function viewReservations(){
+  const rows = await api("/api/reservations");
+  const body = rows.map(r=>`<tr>
+    <td><b>${esc(r.name||r.phone)}</b><div class="tiny muted">${esc(r.phone)}</div></td>
+    <td>${esc(r.date)}</td><td>${esc(r.time)}</td><td>${r.persons}</td>
+    <td class="tiny">${esc(r.notes||"—")}</td>
+    <td><span class="pill ${r.status==="confirmed"?"good":"bad"}">${esc(r.status)}</span>
+      ${r.reminder_sent? `<div class="tiny muted">reminder bheja</div>`:""}</td>
+    <td class="tiny"><button class="btn sm red" onclick="cancelRes(${r.id})">Cancel</button></td></tr>`).join("");
+  return `
+  <div class="card">
+    <h3>Phone call par aayi booking — yahan se daalo</h3>
+    <div class="row">
+      <div><label>Phone</label><input id="rvPhone" placeholder="9198…"></div>
+      <div><label>Naam</label><input id="rvName" placeholder="Sharma ji"></div>
+      <div><label>Date</label><input id="rvDate" type="date"></div>
+      <div><label>Time</label><input id="rvTime" value="19:30"></div>
+      <div><label>Log</label><input id="rvPersons" value="4"></div>
+      <button class="btn primary fix" onclick="addReservation()">Booking save</button>
+    </div>
+  </div>
+  <div class="card" style="margin-top:14px">
+    <h3>Bookings</h3>
+    <table><thead><tr><th>Customer</th><th>Date</th><th>Time</th><th>Log</th><th>Note</th><th>Status</th><th></th></tr></thead>
+    <tbody>${body || `<tr><td colspan="7" class="empty">Koi booking nahi</td></tr>`}</tbody></table>
+    <div class="tiny muted" style="margin-top:8px">Booking se 1 ghanta pehle reminder khud chala jaata hai (Automation tab dekho).</div>
+  </div>`;
+}
+async function addReservation(){
+  const body = {phone: rvPhone.value, name: rvName.value, date: rvDate.value, time: rvTime.value, persons: Number(rvPersons.value||2)};
+  try{ await api("/api/reservations", {method:"POST", body: JSON.stringify(body)}); toast("Booking save ho gayi"); render(); }catch(e){ toast(e.message,true); }
+}
+async function cancelRes(id){ await api("/api/reservations/"+id, {method:"PATCH", body: JSON.stringify({status:"cancelled", notify:true})}); toast("Cancel + customer ko message"); render(); }
+
+async function viewFeedback(){
+  const rows = await api("/api/feedback");
+  return `
+  <div class="card">
+    <h3>Feedback + Google review (F14)</h3>
+    <div class="tiny muted">4-5 star → Google review link + 5% thanks code. 1-3 star → owner ko turant alert, public review se pehle problem solve.</div>
+    <table style="margin-top:12px"><thead><tr><th>Rating</th><th>Customer</th><th>Comment</th><th>Kab</th></tr></thead>
+    <tbody>${rows.map(f=>`<tr><td class="stars">${stars(f.rating)}</td><td>${esc(f.name||f.phone)}</td>
+      <td class="tiny">${esc(f.comment||"")}</td><td class="tiny muted">${esc(f.at||"")}</td></tr>`).join("") || `<tr><td colspan="4" class="empty">Koi feedback nahi</td></tr>`}</tbody></table>
+  </div>`;
+}
+
+async function viewAlerts(){
+  const rows = await api("/api/alerts");
+  return `
+  <div class="card">
+    <h3 style="display:flex;align-items:center;gap:10px">Alerts
+      <button class="btn sm" onclick="readAll()">Sab padh liya ✅</button></h3>
+    ${rows.map(a=>`<div style="padding:11px 0;border-bottom:1px solid #1c2437;display:flex;gap:11px">
+      <div style="flex:0 0 auto"><span class="pill ${a.kind==="complaint"?"bad": a.kind==="payment"?"good":"pending"}">${esc(a.kind)}</span></div>
+      <div style="flex:1;white-space:pre-wrap" class="tiny">${esc(a.message)}<div class="tiny muted">${esc(a.at||"")} ${a.phone? "• "+esc(a.phone):""} ${a.is_read?"• padh liya":""}</div></div>
+      ${a.is_read? "": `<button class="btn sm fix" style="align-self:flex-start" onclick="readOne(${a.id})">✓</button>`}
+    </div>`).join("") || `<div class="empty">Koi alert nahi 🎉</div>`}
+  </div>`;
+}
+async function readOne(id){ await api("/api/alerts/"+id+"/read", {method:"POST"}); render(); }
+async function readAll(){ await api("/api/alerts/read-all", {method:"POST"}); toast("Sab alerts padh liye"); render(); }
+
+async function viewAutomation(){
+  const [status] = await Promise.all([api("/api/automations/status")]);
+  const steps = [
+    ["🎂","Roz 9 bajे","Birthday wish + free dessert coupon (F11)"],
+    ["👨‍🍳","Har 45 sec","Order status aage: confirmed → preparing → packed → rider → delivered (F10)"],
+    ["⭐","1 ghante baad","Delivered order par feedback maangna (F14)"],
+    ["📅","1 ghanta pehle","Table booking ka reminder (F9)"],
+    ["💌","Roz 8 baje","30+ din gayab customers ko winback 20% OFF (F12) — sirf opt-in"],
+    ["📊","Raat 11 baje","Owner ko daily report WhatsApp par (F19)"],
+  ];
+  return `
+  <div class="grid cards">
+    <div class="card"><h3>Automation</h3><div class="kpi">${status.automation_enabled? "ON":"OFF"}</div>
+      <div class="tiny muted">Scheduler har ${status.scheduler_interval_seconds}s chalता hai</div></div>
+    <div class="card"><h3>Owner report time</h3><div class="kpi">${esc(status.owner_report_time)}</div><div class="tiny muted">IST</div></div>
+    <div class="card"><h3>Birthday time</h3><div class="kpi">${esc(status.birthday_time)}</div><div class="tiny muted">IST</div></div>
+    <div class="card"><h3>Winback after</h3><div class="kpi">${status.winback_days}d</div><div class="tiny muted">Limit: ${status.proactive_limit_per_day}/din</div></div>
+  </div>
+  <div class="card" style="margin-top:14px">
+    <h3>Agent khud kya-kya karta hai</h3>
+    <table><tbody>${steps.map(([i,w,t])=>`<tr><td style="width:34px;font-size:18px">${i}</td>
+      <td style="width:150px" class="tiny">${esc(w)}</td><td class="tiny">${esc(t)}</td></tr>`).join("")}</tbody></table>
+    <div class="divider"></div>
+    <h3>Kitchen pipeline (minute = order ke kitne minute baad)</h3>
+    <div class="row">${(status.pipeline||[]).map(([s,m])=>`<div class="chip"><span class="dot live"></span>${esc(s)} @ ${m} min</div>`).join("")}</div>
+    <div class="divider"></div>
+    <button class="btn primary" onclick="runAutomation()">⚡ Abhi saare due tasks chalao</button>
+    <div class="tiny muted" style="margin-top:8px">Dobara chalane par wahi message dobara nahi jaata (idempotent) — spam control.</div>
+  </div>`;
+}
+
+async function viewSettings(){
+  const s = await api("/api/settings");
+  return `
+  <div class="grid two">
+    <div class="card">
+      <h3>System Prompt (AI ka character — Bablu)</h3>
+      <pre>${esc(s.prompt)}</pre>
+      <div class="tiny muted">Isi prompt se AI funny + respectful rehta hai, aur price/discount ke number chhoona uske liye mana hai.</div>
+    </div>
+    <div class="card">
+      <h3>Live modes</h3>
+      <table><tbody>
+        ${Object.entries(s.modes).map(([k,v])=>`<tr><td class="tiny muted">${esc(k)}</td><td class="tiny"><b>${esc(String(v))}</b></td></tr>`).join("")}
+      </tbody></table>
+      <div class="divider"></div>
+      <h3>Restaurant profile</h3>
+      <div class="row">
+        <div><label>Naam</label><input value="${esc(s.restaurant.name)}" disabled></div>
+        <div><label>Hours</label><input value="${esc(s.restaurant.hours)}" disabled></div>
+      </div>
+      <label style="margin-top:9px">Google review link</label>
+      <input id="stReview" value="${esc(s.restaurant.google_review_link||"")}" placeholder="https://g.page/r/…/review">
+      <label style="margin-top:9px">Agent persona extra (mood/style)</label>
+      <textarea id="stPersona" rows="3">${esc(s.agent.persona_extra||"")}</textarea>
+      <button class="btn primary" style="margin-top:10px" onclick="saveSettings()">Save</button>
+      <div class="divider"></div>
+      <h3>Live karne ke liye (.env me badlo)</h3>
+      <div class="tiny muted">WHATSAPP_MODE=live + token, LLM_MODE=auth + API key, PAYMENT_MODE=live + Razorpay keys. Baaki sab yahi ke yahi chalega — code badalne ki zarurat nahi.</div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:14px">
+    <h3>WhatsApp Graph API payload (jo server bhejta hai)</h3>
+    <pre>${esc((await api("/api/demo/whatsapp-payload")).payload)}</pre>
+    <div class="tiny muted">Live mode me yahi request graph.facebook.com par jaati hai (token ke saath).</div>
+  </div>`;
+}
+async function saveSettings(){
+  try{
+    await api("/api/settings", {method:"PUT", body: JSON.stringify({
+      restaurant: {google_review_link: stReview.value}, agent: {persona_extra: stPersona.value}})});
+    toast("Settings save ho gayi"); render();
+  }catch(e){ toast(e.message,true); }
+}
+
+/* ============================ router ============================ */
+const PAGES = {
+  overview: viewOverview, chat: viewChat, orders: viewOrders, menu: viewMenu, customers: viewCustomers,
+  offers: viewOffers, campaigns: viewCampaigns, reservations: viewReservations, feedback: viewFeedback,
+  alerts: viewAlerts, automation: viewAutomation, settings: viewSettings,
+};
+const TITLES = {
+  overview:["Overview","Aaj ka business ek nazar me"], chat:["Live Chat","Agent se baat karo — asli WhatsApp jaisa pipeline"],
+  orders:["Orders","Bill, payment link, kitchen status"], menu:["Menu","Item, price, availability"],
+  customers:["Memory","Har customer ki file — naam, pasand, notes, points"], offers:["Offers & Rules","Discount ka faisla rule karta hai, AI nahi"],
+  campaigns:["Campaigns","Birthday, winback, broadcast — permission ke saath"], reservations:["Table Booking","Booking + reminder"],
+  feedback:["Feedback","Rating, Google review, complaint alert"], alerts:["Alerts","Owner ko turant khabar"],
+  automation:["Automation","Jo kaam agent khud karta hai"], settings:["Settings","Modes, prompt, profile"],
+};
+
+async function render(){
+  renderNav();
+  const title = TITLES[STATE.page] || TITLES.overview;
+  document.getElementById("pageTitle").textContent = title[0];
+  document.getElementById("pageSub").textContent = title[1];
+  const view = document.getElementById("view");
+  view.innerHTML = `<div class="empty">Load ho raha hai…</div>`;
+  try{
+    view.innerHTML = await PAGES[STATE.page]();
+    if(STATE.page==="chat"){ const m=document.getElementById("msgs"); if(m) m.scrollTop=m.scrollHeight;
+      const input=document.getElementById("chatInput");
+      if(input) input.addEventListener("keydown", e=>{ if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); sendChat(); }});
+      input && input.focus(); }
+  }catch(e){
+    view.innerHTML = `<div class="card"><h3>Problem aa gayi</h3><pre>${esc(e.message)}</pre>
+      <div class="tiny muted">Server chal raha hai? <code>uvicorn app.main:app --host 0.0.0.0 --port 8000</code></div></div>`;
+  }
+}
+async function refresh(){ try{ STATE.summary = await api("/api/summary"); STATE.alerts = STATE.summary.open_alerts; }catch(e){} render(); }
+async function runAutomation(){
+  try{ const r = await api("/api/automations/run?force=true", {method:"POST"});
+    const t = r.tasks||{}; toast(`Automation chala: ${Object.keys(t).join(", ")||"kuch due nahi tha"}`); render(); }
+  catch(e){ toast(e.message,true); }
+}
+async function resetDemo(){
+  if(!confirm("Poora data delete karke naya demo banega. Theek hai?")) return;
+  try{ await api("/api/demo/reset", {method:"POST"}); toast("Demo data reset ho gaya"); refresh(); }catch(e){ toast(e.message,true); }
+}
+
+(async function boot(){
+  await refresh();
+  const s = STATE.summary || {};
+  document.getElementById("brandName").textContent = s.restaurant || "Restaurant Agent";
+  document.getElementById("agentName").textContent = (s.agent || "Agent") + " • Digital Waiter";
+})();
+</script>
+</body>
+</html>

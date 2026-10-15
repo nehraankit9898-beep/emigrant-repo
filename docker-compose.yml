@@ -1,0 +1,39 @@
+# docker compose up -d --build
+# Dashboard: http://localhost:8000   |   Postgres: localhost:5432
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: wa-agent-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent_secret_change_me
+      POSTGRES_DB: sharmacafe
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d sharmacafe"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    container_name: wa-agent-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # .env me DATABASE_URL set na ho to yahi use hoga
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://agent:agent_secret_change_me@db:5432/sharmacafe}
+      PORT: 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+
+volumes:
+  db_data:

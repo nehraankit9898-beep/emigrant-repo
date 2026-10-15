@@ -1,0 +1,31 @@
+# --- secrets (kabhi GitHub par mat daalna) ---
+.env
+.env.local
+*.pem
+
+# --- database ---
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# --- node / tooling ---
+node_modules/
+
+# --- os / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
