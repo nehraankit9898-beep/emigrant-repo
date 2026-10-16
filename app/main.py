@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from sqlalchemy import select
 
 from . import automations, menu as menu_engine, orchestrator, payments, seed, whatsapp
@@ -256,6 +256,18 @@ async def mock_pay_done(token: str):
 # --------------------------------------------------------------------------
 # Misc
 # --------------------------------------------------------------------------
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon_ico():
+    """Serve a conventional ICO for clients that request `/favicon.ico`."""
+    return FileResponse(STATIC_DIR / "favicon.ico", media_type="image/x-icon")
+
+
+@app.get("/favicon.svg", include_in_schema=False)
+async def favicon_svg():
+    """Serve the vector favicon linked by the dashboard."""
+    return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml")
+
+
 @app.get("/health")
 async def health():
     return {

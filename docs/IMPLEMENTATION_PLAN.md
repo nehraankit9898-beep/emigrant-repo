@@ -1,6 +1,8 @@
 # IMPLEMENTATION PLAN — remaining work
 
-Date: 2026-10-15 · Branch: `arena/dd5271e6-emigrant-repo` (base `main@e1aef9d`)
+Date: 2026-10-15 · Branch recorded by the earlier audit: `arena/dd5271e6-emigrant-repo`
+
+> **Historical snapshot:** see [REQUESTED_DEPLOYMENT_AUDIT.md](REQUESTED_DEPLOYMENT_AUDIT.md) for this checkout's current verification and deployment blockers.
 
 Ordering: P0 = blocks safe production use · P1 = needed for the SaaS target · P2 = hardening / polish.
 Each item lists the verification that must exist before its status can change to WORKING_VERIFIED.
@@ -15,7 +17,7 @@ Each item lists the verification that must exist before its status can change to
 - Coupon codes via `secrets`; thanks code tail 6 characters.
 - Reminder bug (bookings hours in the past): fixed and tested.
 - Alembic baseline + `0002_audit_events`; `create_all` disabled in production.
-- Docker: non-root, `/ready` healthcheck, `alembic upgrade head` before serve, no hardcoded DB password.
+- Docker: non-root, `/ready` healthcheck, reviewed explicit migrations (not at startup), no hardcoded DB password.
 - Dashboard: token from header only; broadcast opt-in with confirm.
 - Ruff F401/F811 cleanup.
 

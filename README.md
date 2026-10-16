@@ -267,10 +267,11 @@ Is repo ka code tumhara hai — jo bhi karo, bas restaurant wale ke data ka khay
 - `docs/SECURITY_AUDIT.md` — findings, fixes, manual HTTP checks (not a penetration test)
 - `docs/IMPLEMENTATION_PLAN.md` — remaining work, product decisions, next task
 - `docs/DEPLOYMENT.md` — deployment and production checklist
+- `docs/REQUESTED_DEPLOYMENT_AUDIT.md` — current repository identity, Netlify/Neon blockers, audit evidence and verification results
 
 **Database schema:** `make migrate` (Alembic: `alembic upgrade head`). Production me `create_all` nahi chalta; schema migrations se hi banta hai.
 
-**Tests:** `python -m pytest -q` (86 tests; koi real WhatsApp/Razorpay credential nahi chahiye).
+**Tests:** `python -m pytest -q` (test count varies as regression coverage grows; no real WhatsApp/Razorpay credentials are needed).
 
 **Is pass me kya theek hua:** live testing me 4 bug mile aur fix hue — pending order track na hona
 (`pay` ko bill nahi milta tha), bill dobara banate waqt discount hat jaana (customer ko asli se

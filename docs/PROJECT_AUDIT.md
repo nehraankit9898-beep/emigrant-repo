@@ -1,8 +1,10 @@
 # PROJECT AUDIT — Sharma Cafe WhatsApp AI Agent
 
-Date: 2026-10-15 · Branch: `arena/dd5271e6-emigrant-repo` (base `main@e1aef9d`)
+Date: 2026-10-15 · Branch recorded by the earlier audit: `arena/dd5271e6-emigrant-repo`
 
-> **Second pass (this branch).** The previous audit reviewed the code; this pass **ran the product**
+> **Historical snapshot:** branch and test counts below describe an earlier revision, not this checkout. Current repository identity, verification results and deployment blockers are in [REQUESTED_DEPLOYMENT_AUDIT.md](REQUESTED_DEPLOYMENT_AUDIT.md). The Docker migration behavior has since changed to an explicit release step.
+>
+> **Second pass (that earlier branch).** The previous audit reviewed the code; this pass **ran the product**
 > and found four defects that passed all 61 existing tests. They are listed in §7 with their
 > reproduction and fix. Test suite is now 86.
 
@@ -40,7 +42,7 @@ calls, load/concurrency tests, and any intrusive testing. The sandbox has no Doc
 | `app/llm.py` | Optional LLM with demo fallback | Unchanged in this pass; customer text isolation still open |
 | `app/static/dashboard.html` | Single-page dashboard | Token in `sessionStorage` + header only; broadcast opt-in only with confirm |
 | `migrations/` | Alembic | New: baseline from original schema + audit/idempotency tables |
-| `Dockerfile`, `docker-compose.yml`, CI | Packaging | Non-root user, `/ready` healthcheck, migrate-then-serve, no hardcoded DB password |
+| `Dockerfile`, `docker-compose.yml`, CI | Packaging | Historical packaging audit; current Docker startup does not run migrations automatically (see `REQUESTED_DEPLOYMENT_AUDIT.md`) |
 
 ## 3. Baseline findings (before this work)
 
@@ -72,7 +74,7 @@ Ordered by severity. Each is addressed in `SECURITY_AUDIT.md` (status column) or
 - **Orders:** transition validation, unknown status → 400, order number from primary key.
 - **Data:** Alembic baseline (`0001_baseline`) generated from the original schema; `0002_audit_events` adds two
   tables; `init_db()` no longer calls `create_all` in production.
-- **Packaging:** non-root container, migrate-before-serve command, no hardcoded DB password, `POSTGRES_PASSWORD`
+- **Packaging:** non-root container, `/ready` healthcheck, explicit reviewed migrations (not at app startup), no hardcoded DB password, `POSTGRES_PASSWORD`
   required by compose.
 - **Dashboard:** token moved out of URL; broadcast restricted to opt-in with confirmation; demo-only buttons labelled.
 - **Lint:** removed 17 unused imports and one redefinition (ruff F401/F811); fixed the reminder logic bug.

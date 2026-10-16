@@ -28,7 +28,11 @@ ssh root@your-server-ip
 apt update && apt install -y docker.io docker-compose-plugin nginx certbot python3-certbot-nginx git
 git clone <repo-url> /opt/wa-agent && cd /opt/wa-agent
 cp .env.example .env && nano .env      # keys daalo (APP_ENV=production, ADMIN_TOKEN, POSTGRES_PASSWORD, secrets)
-docker compose up -d --build           # container start pe `alembic upgrade head` chalata hai, phir server
+docker compose build
+# Existing database par run karne se pehle backup + schema/version verify karein.
+# Sirf approved migration step me chalayen (app startup ise khud nahi chalata):
+docker compose run --rm app alembic upgrade head
+docker compose up -d
 ```
 
 `docker-compose.yml` me Postgres + agent dono hain. HTTPS ke liye nginx + certbot:
@@ -71,7 +75,10 @@ Meta ke webhook ke liye HTTPS zaroori hai — ngrok/cloudflared free me de dete 
 **docker-compose.yml** Postgres + agent chalata hai:
 
 ```bash
-docker compose up -d --build     # chalu
+docker compose build
+# Migration explicit/reviewed; skip until existing database schema has been checked.
+docker compose run --rm app alembic upgrade head
+docker compose up -d
 docker compose logs -f app       # logs
 docker compose down              # band
 ```
@@ -88,11 +95,12 @@ GET /api/health      → counts (customers, orders, messages) — ADMIN_TOKEN la
 
 - [ ] `APP_ENV=production` (isi se startup strict hota hai: unsafe config par app start nahi hota)
 - [ ] `ADMIN_TOKEN` set, kam se kam 32 random chars (`python -c "import secrets;print(secrets.token_urlsafe(32))"`)
-- [ ] `WHATSAPP_APP_SECRET`, `WHATSAPP_VERIFY_TOKEN`, `RAZORPAY_WEBHOOK_SECRET` set (signature fail-closed hai)
-- [ ] `POSTGRES_PASSWORD` random (compose isi ke bina nahi chalega)
+- [ ] `WHATSAPP_MODE=live`, `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_APP_SECRET`, random `WHATSAPP_VERIFY_TOKEN` (at least 24 chars); `PAYMENT_MODE=live`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` set
+- [ ] `POSTGRES_PASSWORD` random only when using Docker Compose's local PostgreSQL service; it is not the Neon password/setting
 - [ ] `PUBLIC_BASE_URL` sahi (payment links isi se bante hain)
-- [ ] `DATABASE_URL` Postgres (SQLite sirf demo/single cafe)
-- [ ] Schema migration: container start pe automatic (`alembic upgrade head`). Manual: `make migrate`. Data kabhi reset nahi hota.
+- [ ] `DATABASE_URL` PostgreSQL using Psycopg 3 (SQLite sirf demo/single cafe); Neon ka pooled connection URL preferred hai. `postgresql://...` URLs are normalized to `postgresql+psycopg://...` by config.
+- [ ] `DEMO_SEED=false` — production startup refuses demo seeding to avoid inserting sample customers/orders.
+- [ ] Schema migrations are a reviewed, explicit release step (never automatic at app startup): after backup and schema/version review, run `docker compose run --rm app alembic upgrade head` or `make migrate`. Existing Neon schema ko pehle verify/stamp plan ke bina migrate na karein; `0001_baseline` fresh schema ke liye tables create karta hai.
 - [ ] `FORWARDED_ALLOW_IPS` = sirf reverse proxy ka IP (HTTPS proxy ke peeche)
 - [ ] `AUTOMATION_ENABLED=true` aur `OWNER_REPORT_TIME` owner ki pasand ka
 - [ ] Backup cron + uptime monitor (uptime kuma / healthchecks.io) → `/ready` par
