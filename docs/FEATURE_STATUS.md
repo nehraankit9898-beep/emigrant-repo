@@ -1,8 +1,10 @@
 # FEATURE STATUS — Sharma Cafe WhatsApp AI Agent
 
-Date: 2026-10-15 · Branch: `arena/dd5271e6-emigrant-repo` (base `main@e1aef9d`)
+Date: 2026-10-15 · Branch recorded by the earlier audit: `arena/dd5271e6-emigrant-repo`
 
-> **Update (this pass):** four defects found by live end-to-end testing are fixed and covered by
+> **Historical feature snapshot:** this file documents the Sharma Cafe restaurant agent, not StayLoop, and its branch/test counts are from an earlier revision. See [REQUESTED_DEPLOYMENT_AUDIT.md](REQUESTED_DEPLOYMENT_AUDIT.md) for current verification and deployment blockers.
+
+> **Update (that earlier pass):** four defects found by live end-to-end testing are fixed and covered by
 > regression tests — see [Bug fixes verified in this pass](#bug-fixes-verified-in-this-pass) at the
 > bottom. Concurrency claims (P0-2) now have tests instead of code review only.
 

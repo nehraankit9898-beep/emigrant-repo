@@ -82,7 +82,7 @@ DEMO_CUSTOMERS: list[dict] = [
     dict(
         name="Karan Mehta", phone="919876543216", veg="veg", days_ago_first=60,
         history=[
-            (44, [("Cold Coffee", 2), ("Veg Sandwich" if False else "Veg Burger", 2)]),
+            (44, [("Cold Coffee", 2), ("Veg Burger", 2)]),
             (28, [("Mix Veg", 1), ("Butter Naan", 4)]),
             (16, [("Rasmalai", 2), ("Masala Chai", 2)]),
             (7, [("Paneer Butter Masala", 1), ("Laccha Paratha", 2)]),

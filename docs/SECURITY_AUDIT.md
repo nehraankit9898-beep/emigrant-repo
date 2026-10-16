@@ -1,6 +1,8 @@
 # SECURITY AUDIT — Sharma Cafe WhatsApp AI Agent
 
-Date: 2026-10-15 · Branch: `arena/962345dc-emigrant-repo`
+Date: 2026-10-15 · Branch recorded by the earlier audit: `arena/962345dc-emigrant-repo`
+
+> **Historical snapshot:** its branch/test counts describe a prior revision. See [REQUESTED_DEPLOYMENT_AUDIT.md](REQUESTED_DEPLOYMENT_AUDIT.md) for the current checkout and current verification results.
 
 **Important:** this is a code review plus automated tests plus a small set of manual HTTP checks against a local
 server. **No penetration test was performed.** No external system was tested. Findings marked *Open* are real gaps.
@@ -98,6 +100,6 @@ Live provider behaviour was not exercised.
 - `ADMIN_TOKEN` ≥ 32 random chars (`python -c "import secrets;print(secrets.token_urlsafe(32))"`).
 - `WHATSAPP_APP_SECRET`, `WHATSAPP_VERIFY_TOKEN`, `RAZORPAY_WEBHOOK_SECRET` set.
 - `POSTGRES_PASSWORD` random; do not publish the Postgres port in production.
-- Run `alembic upgrade head` before traffic (the container does this on start).
+- Run an approved `alembic upgrade head` as a separate, reviewed release step before traffic; the current container no longer runs migrations at startup. Verify the existing schema/version first.
 - Terminate TLS at a reverse proxy; set `FORWARDED_ALLOW_IPS` to the proxy address only.
 - Keep `.env` out of Git (`.gitignore` and `.dockerignore` already exclude it).
